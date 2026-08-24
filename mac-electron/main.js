@@ -6,15 +6,20 @@ const SHORTCUT = "Alt+Z";
 let popup = null;
 let tray = null;
 let routeParseOrder = null;
+let calculateBill = null;
 
 // Electron's main process IS Node.js, so the EXISTING Likho core is
 // imported directly, in-process — no subprocess, no stdin/stdout bridge.
 // The core is compiled as an ES module (root package.json "type":"module"),
 // so it's loaded via dynamic import() from this CommonJS main process.
 // Requires `npm run build` to have been run in the repo root first.
+// calculateBill is the SAME deterministic calculator the CLI uses — reusing
+// it here, not reimplementing totals math in the popup.
 async function loadCore() {
-  const mod = await import("../dist/src/router.js");
-  routeParseOrder = mod.routeParseOrder;
+  const routerMod = await import("../dist/src/router.js");
+  routeParseOrder = routerMod.routeParseOrder;
+  const calculatorMod = await import("../dist/src/calculator.js");
+  calculateBill = calculatorMod.calculateBill;
 }
 
 function createPopup() {
@@ -83,7 +88,8 @@ app.whenReady().then(async () => {
     }
     try {
       const { parsed } = await routeParseOrder(text);
-      return { ok: true, parsed };
+      const bill = calculateBill(parsed.items, parsed.discountPercent ?? 0);
+      return { ok: true, parsed, bill };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }

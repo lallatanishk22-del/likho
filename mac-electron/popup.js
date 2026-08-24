@@ -11,19 +11,22 @@ function reset() {
   input.focus();
 }
 
-function renderParsed(parsed) {
+function renderParsed(parsed, bill) {
   const lines = [];
   if (parsed.customer) {
     lines.push(parsed.customer.toUpperCase());
     lines.push("");
   }
-  for (const item of parsed.items) {
-    lines.push(`${item.name} × ${item.quantity} — ₹${item.unitPrice}`);
+  for (const line of bill.lines) {
+    lines.push(`${line.name} × ${line.quantity} — ₹${line.lineTotal}`);
   }
-  if (parsed.discountPercent) {
+  lines.push("");
+  if (bill.discountPercent > 0) {
+    lines.push(`Subtotal — ₹${bill.subtotal}`);
+    lines.push(`Discount (${bill.discountPercent}%) — −₹${bill.discountAmount}`);
     lines.push("");
-    lines.push(`Discount: ${parsed.discountPercent}%`);
   }
+  lines.push(`Total — ₹${bill.total}`);
   return lines.join("\n");
 }
 
@@ -38,7 +41,7 @@ async function runZbill() {
   hint.textContent = "";
   if (response.ok) {
     result.className = "ok";
-    result.textContent = renderParsed(response.parsed);
+    result.textContent = renderParsed(response.parsed, response.bill);
   } else {
     result.className = "error";
     result.textContent = response.error;
