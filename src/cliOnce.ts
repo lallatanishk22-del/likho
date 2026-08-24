@@ -1,4 +1,5 @@
 import { routeParseOrder } from "./router.js";
+import { calculateBill } from "./calculator.js";
 
 // Thin bridge for external callers (e.g. the macOS app) that need a single
 // request/response round trip instead of the interactive CLI experience in
@@ -37,8 +38,9 @@ async function main() {
 
   try {
     const { parsed } = await routeParseOrder(input);
+    const bill = calculateBill(parsed.items, parsed.discountPercent ?? 0);
     console.log = originalConsoleLog;
-    process.stdout.write(JSON.stringify({ ok: true, parsed }));
+    process.stdout.write(JSON.stringify({ ok: true, parsed, bill }));
   } catch (err) {
     console.log = originalConsoleLog;
     const message = (err as Error).message;

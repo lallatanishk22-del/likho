@@ -18,7 +18,9 @@ final class ResultPopup {
         textView.textContainerInset = NSSize(width: 4, height: 4)
         textView.sizeToFit()
 
-        let contentHeight = max(60, textView.frame.height + 24)
+        // Capped so a long bill scrolls inside a fixed-size panel instead of
+        // growing the window unboundedly off-screen.
+        let contentHeight = min(420, max(60, textView.frame.height + 24))
         let frame = NSRect(x: point.x, y: point.y - contentHeight, width: width, height: contentHeight)
 
         let panel = NSPanel(
@@ -60,7 +62,7 @@ final class ResultPopup {
     }
 
     private static func render(_ response: LikhoCliResponse) -> String {
-        guard response.ok, let parsed = response.parsed else {
+        guard response.ok, let parsed = response.parsed, let bill = response.bill else {
             return "Needs clarification:\n\n\(response.error ?? "Unknown error")"
         }
 
@@ -69,14 +71,20 @@ final class ResultPopup {
             lines.append(customer.uppercased())
             lines.append("")
         }
-        for item in parsed.items {
-            let priceStr = String(format: "%.2f", item.unitPrice)
-            lines.append("\(item.name) × \(item.quantity) — ₹\(priceStr)")
+        for line in bill.lines {
+            lines.append("\(line.name) × \(line.quantity) — ₹\(formatAmount(line.lineTotal))")
         }
-        if let discount = parsed.discountPercent {
+        lines.append("")
+        if bill.discountPercent > 0 {
+            lines.append("Subtotal — ₹\(formatAmount(bill.subtotal))")
+            lines.append("Discount (\(formatAmount(bill.discountPercent))%) — −₹\(formatAmount(bill.discountAmount))")
             lines.append("")
-            lines.append("Discount: \(discount)%")
         }
+        lines.append("Total — ₹\(formatAmount(bill.total))")
         return lines.joined(separator: "\n")
+    }
+
+    private static func formatAmount(_ value: Double) -> String {
+        value == value.rounded() ? String(format: "%.0f", value) : String(format: "%.2f", value)
     }
 }

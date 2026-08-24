@@ -25,9 +25,25 @@ struct LikhoParsedOrder: Decodable {
     let discountPercent: Double?
 }
 
+struct LikhoBillLine: Decodable {
+    let name: String
+    let quantity: Int
+    let unitPrice: Double
+    let lineTotal: Double
+}
+
+struct LikhoBill: Decodable {
+    let lines: [LikhoBillLine]
+    let subtotal: Double
+    let discountPercent: Double
+    let discountAmount: Double
+    let total: Double
+}
+
 struct LikhoCliResponse: Decodable {
     let ok: Bool
     let parsed: LikhoParsedOrder?
+    let bill: LikhoBill?
     let error: String?
 }
 
