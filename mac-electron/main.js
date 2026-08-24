@@ -20,7 +20,7 @@ async function loadCore() {
 function createPopup() {
   const win = new BrowserWindow({
     width: 420,
-    height: 90,
+    height: 420,
     show: false,
     frame: false,
     resizable: false,
