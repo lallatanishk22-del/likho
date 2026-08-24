@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    background: rgba(30, 30, 30, 0.96);
+    color: #eee;
+    border-radius: 10px;
+    overflow: hidden;
+    -webkit-app-region: drag;
+  }
+  #input {
+    -webkit-app-region: no-drag;
+    width: 100%;
+    padding: 16px 18px;
+    font-size: 18px;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: #fff;
+  }
+  #hint, #result {
+    -webkit-app-region: no-drag;
+    padding: 0 18px 14px 18px;
+    font-size: 13px;
+    color: #999;
+    white-space: pre-wrap;
+    max-height: 220px;
+    overflow-y: auto;
+  }
+  #result.error { color: #ff8a8a; }
+  #result.ok { color: #b5f2c8; }
+</style>
+</head>
+<body>
+  <input id="input" type="text" placeholder="Type a command… (zbill)" autofocus />
+  <div id="hint"></div>
+  <div id="result"></div>
+  <script src="popup.js"></script>
+</body>
+</html>
