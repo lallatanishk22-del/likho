@@ -1,7 +1,7 @@
 const { app, BrowserWindow, globalShortcut, ipcMain, clipboard, Tray, nativeImage, screen } = require("electron");
 const path = require("path");
 
-const SHORTCUT = "CommandOrControl+Shift+L";
+const SHORTCUT = "Alt+Z";
 
 let popup = null;
 let tray = null;
