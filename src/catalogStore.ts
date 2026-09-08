@@ -7,7 +7,7 @@ import type { CatalogProduct, PriceCatalog } from "./catalog.js";
 // Uses the SERVICE ROLE key: every Likho table has RLS enabled with no
 // policies (deny-all), so nothing is reachable from a browser or public
 // client. Only this server-side process can read or write.
-const SUPABASE_URL = process.env["SUPABASE_URL"] ?? "https://ylwgvotofppgjwwkexsi.supabase.co";
+const SUPABASE_URL = process.env["SUPABASE_URL"] ?? "https://gzplynqqsmkwyrjxprai.supabase.co";
 const SERVICE_KEY = process.env["SUPABASE_SERVICE_ROLE_KEY"];
 
 function requireKey(): string {
@@ -48,7 +48,7 @@ interface ProductRow {
   id: string;
   name: string;
   price: string | number;
-  likho_product_aliases: { alias: string }[] | null;
+  product_aliases: { alias: string }[] | null;
 }
 
 // Resolves a platform user (Telegram chat id today, WhatsApp number later)
@@ -60,18 +60,18 @@ export async function getOrCreateBusinessForChannel(
   displayName: string,
 ): Promise<string> {
   const existing = (await rest(
-    `likho_business_channels?platform=eq.${platform}&platform_user_id=eq.${encodeURIComponent(platformUserId)}&select=business_id`,
+    `business_channels?platform=eq.${platform}&platform_user_id=eq.${encodeURIComponent(platformUserId)}&select=business_id`,
   )) as BusinessChannelRow[];
 
   if (existing.length > 0) return existing[0]!.business_id;
 
-  const created = (await rest("likho_businesses", {
+  const created = (await rest("businesses", {
     method: "POST",
     body: JSON.stringify({ name: displayName }),
   })) as { id: string }[];
   const businessId = created[0]!.id;
 
-  await rest("likho_business_channels", {
+  await rest("business_channels", {
     method: "POST",
     body: JSON.stringify({ business_id: businessId, platform, platform_user_id: platformUserId }),
   });
@@ -81,14 +81,14 @@ export async function getOrCreateBusinessForChannel(
 
 export async function loadCatalog(businessId: string): Promise<PriceCatalog> {
   const rows = (await rest(
-    `likho_products?business_id=eq.${businessId}&active=is.true&select=id,name,price,likho_product_aliases(alias)`,
+    `products?business_id=eq.${businessId}&active=is.true&select=id,name,price,product_aliases(alias)`,
   )) as ProductRow[];
 
   const products: CatalogProduct[] = rows.map((row) => ({
     id: row.id,
     name: row.name,
     price: Number(row.price),
-    aliases: (row.likho_product_aliases ?? []).map((a) => a.alias),
+    aliases: (row.product_aliases ?? []).map((a) => a.alias),
   }));
 
   return { businessId, products };
@@ -102,7 +102,7 @@ export async function upsertProduct(
   name: string,
   price: number,
 ): Promise<void> {
-  await rest("likho_products?on_conflict=business_id,name", {
+  await rest("products?on_conflict=business_id,name", {
     method: "POST",
     headers: { Prefer: "resolution=merge-duplicates,return=representation" },
     body: JSON.stringify({
@@ -116,7 +116,7 @@ export async function upsertProduct(
 
 export async function deactivateProduct(businessId: string, name: string): Promise<boolean> {
   const updated = (await rest(
-    `likho_products?business_id=eq.${businessId}&name=eq.${encodeURIComponent(name.toLowerCase().trim())}`,
+    `products?business_id=eq.${businessId}&name=eq.${encodeURIComponent(name.toLowerCase().trim())}`,
     { method: "PATCH", body: JSON.stringify({ active: false }) },
   )) as unknown[];
   return Array.isArray(updated) && updated.length > 0;
