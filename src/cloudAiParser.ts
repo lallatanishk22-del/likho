@@ -2,7 +2,8 @@ import type { ParsedOrder } from "./structuredOrder.js";
 import { validateStructuredShape } from "./structuredOrder.js";
 import { interpretAndTrust } from "./trustLayer.js";
 import { ORDER_EXTRACTION_SYSTEM_PROMPT } from "./orderExtractionPrompt.js";
-import type { AiProvider } from "./aiProvider.js";
+import type { AiProvider, ParseOptions } from "./aiProvider.js";
+import { applyCatalog } from "./catalog.js";
 
 // Stronger fallback brain, used only when the local model fails shape
 // validation or the trust layer. It receives the ORIGINAL message and
@@ -19,7 +20,7 @@ interface FireworksChatResponse {
   choices: { message: { content: string } }[];
 }
 
-export async function parseOrderWithCloudAI(text: string): Promise<ParsedOrder> {
+export async function parseOrderWithCloudAI(text: string, options?: ParseOptions): Promise<ParsedOrder> {
   const apiKey = process.env["FIREWORKS_API_KEY"];
   if (!apiKey) {
     throw new Error("FIREWORKS_API_KEY is not set — cannot reach the cloud fallback model.");
@@ -61,7 +62,8 @@ export async function parseOrderWithCloudAI(text: string): Promise<ParsedOrder> 
     throw new Error("Cloud model returned invalid JSON.");
   }
 
-  const shape = validateStructuredShape(raw, text);
+  const withPrices = applyCatalog(raw, options?.catalog);
+  const shape = validateStructuredShape(withPrices, text);
   return interpretAndTrust(shape, text);
 }
 

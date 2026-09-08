@@ -12,6 +12,12 @@ export interface StructuredItem {
   quantity: number;
   unitPrice: number;
   evidence: string;
+  // Where this price came from: "stated" = the seller wrote it in this
+  // message (message-grounded, model-supplied, strictly checked);
+  // "catalog" = looked up deterministically from the seller's price store.
+  // Optional: absent means "stated", so anything that does not explicitly
+  // declare catalog provenance gets the strict check by default.
+  priceSource?: "stated" | "catalog";
 }
 
 export interface StructuredInterpretation {
@@ -143,6 +149,9 @@ export function validateStructuredShape(
     const quantity = item["quantity"] as number;
     const unitPrice = item["unitPrice"] as number;
     const evidence = item["evidence"] as string;
+    // Set by catalog.ts's resolvePrices() for prices supplied by the price
+    // store. Absent (undefined) for anything coming straight from a model.
+    const priceSource = item["priceSource"] === "catalog" ? "catalog" : "stated";
 
     if (!evidenceIsGrounded(evidence, originalMessage)) {
       throw new Error(
@@ -159,11 +168,19 @@ export function validateStructuredShape(
     if (!quantityAppearsIn(quantity, originalMessage)) {
       throw new Error(`Quantity for "${name}" (${quantity}) isn't clearly supported by the message. Please confirm.`);
     }
-    if (!numberAppearsIn(unitPrice, originalMessage)) {
+    // Message-grounding applies ONLY to prices the model claims were stated
+    // in the message — that check exists to catch an LLM inventing a number.
+    // A "catalog" price was never chosen by the model at all: it came from a
+    // deterministic lookup in the seller's own price store (catalog.ts), so
+    // it is trusted by provenance and is legitimately absent from the
+    // message text. Anything without an explicit "catalog" marker is treated
+    // as model-supplied and checked exactly as before — the default is the
+    // strict path, never the permissive one.
+    if (priceSource !== "catalog" && !numberAppearsIn(unitPrice, originalMessage)) {
       throw new Error(`Price for "${name}" (₹${unitPrice}) isn't clearly supported by the message. Please confirm.`);
     }
 
-    return { name, quantity, unitPrice, evidence };
+    return { name, quantity, unitPrice, evidence, priceSource };
   });
 
   let discountPercent: number | null = null;

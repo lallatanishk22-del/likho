@@ -2,7 +2,8 @@ import type { ParsedOrder } from "./structuredOrder.js";
 import { validateStructuredShape } from "./structuredOrder.js";
 import { interpretAndTrust } from "./trustLayer.js";
 import { ORDER_EXTRACTION_SYSTEM_PROMPT } from "./orderExtractionPrompt.js";
-import type { AiProvider } from "./aiProvider.js";
+import type { AiProvider, ParseOptions } from "./aiProvider.js";
+import { applyCatalog } from "./catalog.js";
 
 // Extracts a structured order from messy WhatsApp-style text via a local
 // Ollama model, then runs it through shape validation + the trust layer
@@ -50,9 +51,10 @@ async function callOllama(text: string): Promise<Record<string, unknown>> {
   }
 }
 
-export async function parseOrderWithLocalAI(text: string): Promise<ParsedOrder> {
+export async function parseOrderWithLocalAI(text: string, options?: ParseOptions): Promise<ParsedOrder> {
   const raw = await callOllama(text);
-  const shape = validateStructuredShape(raw, text);
+  const withPrices = applyCatalog(raw, options?.catalog);
+  const shape = validateStructuredShape(withPrices, text);
   return interpretAndTrust(shape, text);
 }
 
@@ -81,7 +83,10 @@ export interface DiagnosedResult {
   raw: Record<string, unknown> | null;
 }
 
-export async function parseOrderWithLocalAIDiagnosed(text: string): Promise<DiagnosedResult> {
+export async function parseOrderWithLocalAIDiagnosed(
+  text: string,
+  options?: ParseOptions,
+): Promise<DiagnosedResult> {
   let raw: Record<string, unknown>;
   try {
     raw = await callOllama(text);
@@ -119,7 +124,8 @@ export async function parseOrderWithLocalAIDiagnosed(text: string): Promise<Diag
   }
 
   try {
-    const shape = validateStructuredShape(raw, text);
+    const withPrices = applyCatalog(raw, options?.catalog);
+    const shape = validateStructuredShape(withPrices, text);
     const parsed = interpretAndTrust(shape, text);
     return {
       modelResult,

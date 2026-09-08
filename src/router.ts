@@ -3,8 +3,9 @@ import path from "node:path";
 import { localProvider } from "./localAiParser.js";
 import { cloudProvider } from "./cloudAiParser.js";
 import type { ParsedOrder } from "./structuredOrder.js";
-import type { ProviderName } from "./aiProvider.js";
+import type { ParseOptions, ProviderName } from "./aiProvider.js";
 import { TrustRejectedError, type TrustSignals } from "./trustLayer.js";
+import { CatalogResolutionError } from "./catalog.js";
 
 export interface RoutingLog {
   timestamp: string;
@@ -64,7 +65,10 @@ export class RoutingFailedError extends Error {
 // hard"; it's "did local prove it could safely interpret this one." The
 // cloud result goes through the identical two-stage check — no double
 // standard, no repairing local's output.
-export async function routeParseOrder(message: string): Promise<RouteResult> {
+export async function routeParseOrder(
+  message: string,
+  options?: ParseOptions,
+): Promise<RouteResult> {
   const log: RoutingLog = {
     timestamp: new Date().toISOString(),
     message,
@@ -84,7 +88,7 @@ export async function routeParseOrder(message: string): Promise<RouteResult> {
 
   const localStart = Date.now();
   try {
-    const parsed = await localProvider.parseOrder(message);
+    const parsed = await localProvider.parseOrder(message, options);
     log.localLatencyMs = Date.now() - localStart;
     log.totalLatencyMs = log.localLatencyMs;
     log.outcome = "valid";
@@ -93,6 +97,17 @@ export async function routeParseOrder(message: string): Promise<RouteResult> {
     return { parsed, log };
   } catch (localErr) {
     log.localLatencyMs = Date.now() - localStart;
+    // A catalog miss is deterministic — the cloud model reads the same
+    // price store and would fail identically. Short-circuit so the seller
+    // gets the actual "I don't have a price for X" message instead of a
+    // cloud error, and we don't pay for a call that cannot help.
+    if (localErr instanceof CatalogResolutionError) {
+      log.totalLatencyMs = log.localLatencyMs;
+      log.outcome = "clarification";
+      log.finalError = localErr.message;
+      recordLog(log);
+      throw localErr;
+    }
     log.escalated = true;
     log.escalationReason = (localErr as Error).message;
     if (localErr instanceof TrustRejectedError) {
@@ -104,7 +119,7 @@ export async function routeParseOrder(message: string): Promise<RouteResult> {
   log.selectedProvider = "cloud";
   const cloudStart = Date.now();
   try {
-    const parsed = await cloudProvider.parseOrder(message);
+    const parsed = await cloudProvider.parseOrder(message, options);
     log.cloudLatencyMs = Date.now() - cloudStart;
     log.totalLatencyMs = log.localLatencyMs + log.cloudLatencyMs;
     log.outcome = "valid";

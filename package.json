@@ -9,6 +9,7 @@
     "start:ai": "npm run build && node dist/src/indexAi.js",
     "test": "npm run build && node --test dist/test/*.test.js",
     "telegram": "npm run build && node dist/src/telegramBot.js",
+    "api": "npm run build && node dist/src/apiServer.js",
     "eval:ollama": "npm run build && node dist/eval/run.js",
     "eval:routed": "npm run build && node dist/eval/runRouted.js",
     "exp:baseline": "npm run build && node dist/eval/experiments/runBaseline.js",
