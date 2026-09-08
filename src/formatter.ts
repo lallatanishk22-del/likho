@@ -8,7 +8,13 @@ function titleCase(name: string): string {
 }
 
 function formatRupees(amount: number): string {
-  return `₹${amount.toLocaleString("en-IN")}`;
+  // Whole rupees stay clean (₹620); any paise component always shows two
+  // digits (₹110.10, never ₹110.1) as money should.
+  const hasPaise = Math.round(amount * 100) % 100 !== 0;
+  return `₹${amount.toLocaleString("en-IN", {
+    minimumFractionDigits: hasPaise ? 2 : 0,
+    maximumFractionDigits: 2,
+  })}`;
 }
 
 export function formatBill(bill: Bill, customer?: string | null): string {
