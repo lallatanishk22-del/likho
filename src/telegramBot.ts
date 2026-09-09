@@ -22,6 +22,9 @@ interface TelegramMessage {
   message_id?: number;
   chat: TelegramChat;
   text?: string;
+  // Populated when the seller replies to a message. This is how an order
+  // written by someone else gets handed to Likho without retyping it.
+  reply_to_message?: { message_id?: number; text?: string };
 }
 
 interface TelegramUpdate {
@@ -98,8 +101,13 @@ See them any time:
 Remove one:
   /remove lassi
 
-Then just send the order, no prices needed:
+Then send the order, no prices needed:
   2 paneer, 4 samosa and 1 lassi
+
+Or use the trigger explicitly:
+  /zbill 2 paneer 3 samosa
+
+To bill someone else's message, long-press it → Reply → /zbill
 
 You can still state a price in the order to override your list for that bill:
   2 paneer 150
@@ -224,6 +232,27 @@ async function handleMessage(message: TelegramMessage, text: string): Promise<st
         return await handlePrices(businessId);
       case "/remove":
         return await handleRemove(businessId, args);
+      case "/zbill": {
+        // Order text comes from the replied-to message if there is one
+        // (the "send this to Likho" gesture), otherwise from the rest of
+        // this message.
+        const replied = message.reply_to_message?.text?.trim();
+        const orderText = args.trim().length > 0 ? args.trim() : replied ?? "";
+        if (orderText.length === 0) {
+          return (
+            "Send the order with it, or reply to the customer's message:\n" +
+            "  /zbill 2 paneer 3 samosa\n\n" +
+            "Or long-press their order → Reply → /zbill"
+          );
+        }
+        // When billing a replied-to message, anchor the bill to THAT
+        // message so Check Updates later knows where to resume from.
+        const anchorId =
+          replied && args.trim().length === 0 && message.reply_to_message?.message_id != null
+            ? String(message.reply_to_message.message_id)
+            : sourceMessageId;
+        return await handleOrder(businessId, chatId, orderText, anchorId);
+      }
       case "/bill":
         return await handleShowBill(businessId);
       case "/done":
