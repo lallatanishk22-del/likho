@@ -2,6 +2,7 @@ import { routeParseOrder } from "./router.js";
 import { calculateBill } from "./calculator.js";
 import { formatBill } from "./formatter.js";
 import { getOrCreateBusinessForChannel, loadCatalog, upsertProduct, deactivateProduct } from "./catalogStore.js";
+import { createBillSession, getCurrentDraft, finalizeBill, getTodaysSales, type StoredBill } from "./billStore.js";
 
 // Telegram adapter. Deliberately thin: it owns message plumbing and command
 // routing only. All order understanding, validation, trust and money math
@@ -18,6 +19,7 @@ interface TelegramChat {
 }
 
 interface TelegramMessage {
+  message_id?: number;
   chat: TelegramChat;
   text?: string;
 }
@@ -61,6 +63,28 @@ async function sendTyping(chatId: number): Promise<void> {
   }
 }
 
+// Renders a bill from STORED state, so the seller always sees exactly what
+// is persisted rather than a freshly recomputed guess.
+function renderStoredBill(stored: StoredBill): string {
+  const { session, items } = stored;
+  const lines: string[] = [];
+  if (session.customer_ref) {
+    lines.push(session.customer_ref.toUpperCase(), "");
+  }
+  for (const item of items) {
+    lines.push(`${item.name_snapshot} × ${item.quantity} — ₹${Number(item.line_total)}`);
+  }
+  lines.push("");
+  if (Number(session.discount_percent) > 0) {
+    lines.push(`Subtotal — ₹${Number(session.subtotal)}`);
+    lines.push(`Discount (${Number(session.discount_percent)}%) — −₹${Number(session.discount_amount)}`);
+  }
+  lines.push(`TOTAL — ₹${Number(session.total)}`);
+  lines.push("");
+  lines.push(`Bill #${session.id.slice(0, 8)} · ${session.status}`);
+  return lines.join("\n");
+}
+
 const HELP = `Likho — send me the order, I'll make the bill.
 
 First, set your prices:
@@ -78,7 +102,12 @@ Then just send the order, no prices needed:
   2 paneer, 4 samosa and 1 lassi
 
 You can still state a price in the order to override your list for that bill:
-  2 paneer 150`;
+  2 paneer 150
+
+Your current bill is remembered:
+  /bill    show it again
+  /done    mark it sent, count it in today's sales
+  /sales   today's total`;
 
 async function handleAdd(businessId: string, args: string): Promise<string> {
   // "/add paneer tikka 120" -> name = everything but the last token.
@@ -114,7 +143,12 @@ async function handleRemove(businessId: string, args: string): Promise<string> {
 }
 
 // The core flow: order text -> existing pipeline (now catalog-aware) -> bill.
-async function handleOrder(businessId: string, chatId: number, text: string): Promise<string> {
+async function handleOrder(
+  businessId: string,
+  chatId: number,
+  text: string,
+  sourceMessageId: string | null,
+): Promise<string> {
   await sendTyping(chatId);
   const catalog = await loadCatalog(businessId);
 
@@ -128,13 +162,41 @@ async function handleOrder(businessId: string, chatId: number, text: string): Pr
   try {
     const { parsed } = await routeParseOrder(text, { catalog });
     const bill = calculateBill(parsed.items, parsed.discountPercent ?? 0);
-    return formatBill(bill, parsed.customer);
+    // Persist as a draft so the bill survives the reply and can be looked
+    // at, edited and updated later. This is what makes it a transaction
+    // rather than a one-off message.
+    const stored = await createBillSession(businessId, parsed, bill, sourceMessageId);
+    return `${renderStoredBill(stored)}\n\n/done when you've sent it to the customer.`;
   } catch (err) {
     return (err as Error).message;
   }
 }
 
+async function handleShowBill(businessId: string): Promise<string> {
+  const draft = await getCurrentDraft(businessId);
+  if (!draft) return "No open bill. Send me an order and I'll make one.";
+  return renderStoredBill(draft);
+}
+
+async function handleDone(businessId: string): Promise<string> {
+  const draft = await getCurrentDraft(businessId);
+  if (!draft) return "No open bill to close.";
+  await finalizeBill(draft.session.id);
+  const sales = await getTodaysSales(businessId);
+  return (
+    `Bill #${draft.session.id.slice(0, 8)} closed — ₹${Number(draft.session.total)}.\n\n` +
+    `Today: ${sales.count} bill(s), ₹${sales.total}`
+  );
+}
+
+async function handleSales(businessId: string): Promise<string> {
+  const sales = await getTodaysSales(businessId);
+  if (sales.count === 0) return "No bills closed today yet.";
+  return `Today's sales\n\n${sales.count} bill(s)\n₹${sales.total} billed`;
+}
+
 async function handleMessage(message: TelegramMessage, text: string): Promise<string> {
+  const sourceMessageId = message.message_id != null ? String(message.message_id) : null;
   const chatId = message.chat.id;
   const displayName = message.chat.first_name ?? message.chat.username ?? `telegram:${chatId}`;
 
@@ -162,9 +224,15 @@ async function handleMessage(message: TelegramMessage, text: string): Promise<st
         return await handlePrices(businessId);
       case "/remove":
         return await handleRemove(businessId, args);
+      case "/bill":
+        return await handleShowBill(businessId);
+      case "/done":
+        return await handleDone(businessId);
+      case "/sales":
+        return await handleSales(businessId);
       default:
         if (command.startsWith("/")) return `Unknown command.\n\n${HELP}`;
-        return await handleOrder(businessId, chatId, trimmed);
+        return await handleOrder(businessId, chatId, trimmed, sourceMessageId);
     }
   } catch (err) {
     return `Something went wrong: ${(err as Error).message}`;

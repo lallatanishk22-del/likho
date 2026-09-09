@@ -3,6 +3,10 @@ export interface OrderItem {
   name: string;
   quantity: number;
   unitPrice: number;
+  // Where the price came from. Carried all the way through to the stored
+  // bill so provenance is auditable after the fact. Optional so existing
+  // callers (CLI, tests) are unaffected; absent means "stated".
+  priceSource?: "stated" | "catalog" | "manual";
 }
 
 // One line of the final bill, after money math has been applied.

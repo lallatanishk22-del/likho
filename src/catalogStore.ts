@@ -20,7 +20,7 @@ function requireKey(): string {
   return SERVICE_KEY;
 }
 
-async function rest(path: string, init: RequestInit = {}): Promise<unknown> {
+export async function rest(path: string, init: RequestInit = {}): Promise<unknown> {
   const key = requireKey();
   const response = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
     ...init,

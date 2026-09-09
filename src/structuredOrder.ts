@@ -204,6 +204,11 @@ export function toParsedOrder(order: ValidatedOrder): ParsedOrder {
   return {
     customer: order.customer,
     discountPercent: order.discountPercent,
-    items: order.items.map(({ name, quantity, unitPrice }) => ({ name, quantity, unitPrice })),
+    items: order.items.map(({ name, quantity, unitPrice, priceSource }) => ({
+      name,
+      quantity,
+      unitPrice,
+      priceSource: priceSource ?? "stated",
+    })),
   };
 }
