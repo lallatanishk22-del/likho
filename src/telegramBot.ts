@@ -30,15 +30,35 @@ interface TelegramUpdate {
 interface TelegramGetUpdatesResponse {
   ok: boolean;
   result: TelegramUpdate[];
+  error_code?: number;
+  description?: string;
 }
 
 async function sendMessage(chatId: number, text: string): Promise<void> {
   if (!API_BASE) return;
-  await fetch(`${API_BASE}/sendMessage`, {
+  const response = await fetch(`${API_BASE}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, text }),
   });
+  if (!response.ok) {
+    throw new Error(`sendMessage failed (${response.status}): ${await response.text()}`);
+  }
+}
+
+// Understanding an order takes several seconds on the local model. Without
+// this the chat just sits silent and looks broken.
+async function sendTyping(chatId: number): Promise<void> {
+  if (!API_BASE) return;
+  try {
+    await fetch(`${API_BASE}/sendChatAction`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, action: "typing" }),
+    });
+  } catch {
+    // Purely cosmetic — never let this affect the actual reply.
+  }
 }
 
 const HELP = `Likho — send me the order, I'll make the bill.
@@ -94,7 +114,8 @@ async function handleRemove(businessId: string, args: string): Promise<string> {
 }
 
 // The core flow: order text -> existing pipeline (now catalog-aware) -> bill.
-async function handleOrder(businessId: string, text: string): Promise<string> {
+async function handleOrder(businessId: string, chatId: number, text: string): Promise<string> {
+  await sendTyping(chatId);
   const catalog = await loadCatalog(businessId);
 
   if (catalog.products.length === 0) {
@@ -143,7 +164,7 @@ async function handleMessage(message: TelegramMessage, text: string): Promise<st
         return await handleRemove(businessId, args);
       default:
         if (command.startsWith("/")) return `Unknown command.\n\n${HELP}`;
-        return await handleOrder(businessId, trimmed);
+        return await handleOrder(businessId, chatId, trimmed);
     }
   } catch (err) {
     return `Something went wrong: ${(err as Error).message}`;
@@ -167,17 +188,53 @@ async function pollLoop(): Promise<void> {
       continue;
     }
 
-    if (!data.ok) continue;
+    if (!data.ok) {
+      // Never swallow this silently. A 409 here means another copy of the
+      // bot is polling the same token, and the two instances split incoming
+      // messages between them — which looks exactly like messages randomly
+      // going unanswered.
+      console.error(
+        `[telegram] getUpdates returned not-ok: ${JSON.stringify(data).slice(0, 200)}`,
+      );
+      if (data.error_code === 409) {
+        console.error(
+          "[telegram] 409 Conflict — another instance of this bot is already running. " +
+            "Stop the other one (pkill -f telegramBot.js), or messages will keep going missing.",
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      continue;
+    }
 
     for (const update of data.result) {
-      offset = update.update_id + 1;
       const message = update.message;
       const text = message?.text;
-      if (!message || !text) continue;
 
-      console.log(`[telegram] chat=${message.chat.id} text=${JSON.stringify(text)}`);
-      const reply = await handleMessage(message, text);
-      await sendMessage(message.chat.id, reply);
+      // Each update is fully isolated: one failure must never kill the poll
+      // loop or take unrelated messages down with it. Previously an
+      // exception here escaped pollLoop entirely and the bot died silently.
+      try {
+        if (message && text) {
+          console.log(`[telegram] <- chat=${message.chat.id} ${JSON.stringify(text)}`);
+          const reply = await handleMessage(message, text);
+          await sendMessage(message.chat.id, reply);
+          console.log(`[telegram] -> chat=${message.chat.id} replied (${reply.length} chars)`);
+        }
+      } catch (err) {
+        // Log loudly and still try to tell the seller something, so a
+        // failure is never invisible on either side.
+        console.error(`[telegram] FAILED update ${update.update_id}:`, err);
+        if (message) {
+          await sendMessage(
+            message.chat.id,
+            "Something went wrong handling that message. Please try again.",
+          ).catch(() => undefined);
+        }
+      } finally {
+        // Advance only after the attempt completes, so a crash mid-process
+        // cannot silently consume a message without answering it.
+        offset = update.update_id + 1;
+      }
     }
   }
 }
