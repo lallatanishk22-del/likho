@@ -7,6 +7,16 @@ import type { ParseOptions, ProviderName } from "./aiProvider.js";
 import { TrustRejectedError, type TrustSignals } from "./trustLayer.js";
 import { CatalogResolutionError } from "./catalog.js";
 
+// The cloud provider can fail for two very different reasons: it genuinely
+// judged the order unclear, or it was never reachable (no key, network
+// down). Only the first is meaningful to a seller — "FIREWORKS_API_KEY is
+// not set" is an operator problem and must never surface in a chat.
+function isCloudUnavailable(message: string): boolean {
+  return /FIREWORKS_API_KEY is not set|Cloud model unavailable|returned no content|returned invalid JSON/i.test(
+    message,
+  );
+}
+
 export interface RoutingLog {
   timestamp: string;
   message: string;
@@ -130,12 +140,20 @@ export async function routeParseOrder(
     log.cloudLatencyMs = Date.now() - cloudStart;
     log.totalLatencyMs = log.localLatencyMs + log.cloudLatencyMs;
     log.outcome = "clarification";
-    log.finalError = (cloudErr as Error).message;
+    const cloudMessage = (cloudErr as Error).message;
+    log.finalError = cloudMessage;
     if (cloudErr instanceof TrustRejectedError) {
       log.cloudTrustSignals = cloudErr.signals;
       log.cloudInterpretation = cloudErr.interpretation;
     }
     recordLog(log);
-    throw new RoutingFailedError((cloudErr as Error).message, log);
+
+    // If the cloud was simply unreachable, the seller-facing reason is the
+    // LOCAL model's — that is the one that actually judged their order.
+    const sellerFacing =
+      isCloudUnavailable(cloudMessage) && log.escalationReason
+        ? log.escalationReason
+        : cloudMessage;
+    throw new RoutingFailedError(sellerFacing, log);
   }
 }

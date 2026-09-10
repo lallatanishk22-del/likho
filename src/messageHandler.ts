@@ -61,16 +61,15 @@ See them any time:
 Remove one:
   /remove lassi
 
-Then send the order, no prices needed:
-  2 paneer, 4 samosa and 1 lassi
+Then bill an order with /zbill:
+  /zbill 2 paneer, 4 samosa and 1 lassi
 
-Or use the trigger explicitly:
-  /zbill 2 paneer 3 samosa
+No prices needed — I use your list.
 
 To bill someone else's message, long-press it → Reply → /zbill
 
-You can still state a price in the order to override your list for that bill:
-  2 paneer 150
+You can state a price to override your list for one bill:
+  /zbill 2 paneer 150
 
 Your current bill is remembered:
   /bill    show it again
@@ -220,7 +219,17 @@ export async function handleIncoming(incoming: IncomingMessage): Promise<string>
         return await handleSales(businessId);
       default:
         if (command.startsWith("/")) return `Unknown command.\n\n${HELP}`;
-        return await handleOrder(businessId, trimmed, sourceMessageId, onSlowWork);
+        // A bill is only ever created when the seller explicitly asks for
+        // one. Untriggered text is answered instantly without touching the
+        // model — it costs nothing, it stops "hi" being parsed as an order,
+        // and it is the same habit that keeps Likho out of the way when
+        // this moves into real customer conversations.
+        return (
+          "Send it with /zbill and I'll make the bill:\n" +
+          `  /zbill ${/\d/.test(trimmed) && trimmed.length <= 60 ? trimmed : "2 paneer 3 samosa"}\n\n` +
+          "Or reply to the customer's order → /zbill\n\n" +
+          "/help for everything else."
+        );
     }
   } catch (err) {
     return `Something went wrong: ${(err as Error).message}`;
