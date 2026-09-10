@@ -1,6 +1,7 @@
 import { rest } from "./catalogStore.js";
 import type { BusinessProfile } from "./billRender.js";
 import { asTemplateId, type TemplateId } from "./billData.js";
+import { asOnboardingStep, type OnboardingStep } from "./onboarding.js";
 
 // Reading and writing the business's own details and chosen bill style.
 // Separate from catalogStore because that file is about products; this is
@@ -16,6 +17,8 @@ interface BusinessRow {
   logo_url: string | null;
   footer_note: string | null;
   bill_template: string | null;
+  onboarding_step: string | null;
+  business_kind: string | null;
 }
 
 export async function loadBusinessProfile(businessId: string): Promise<BusinessProfile> {
@@ -83,4 +86,57 @@ export async function setBusinessField(
     body: JSON.stringify({ [column]: trimmed.length > 0 ? trimmed : null }),
   });
   return true;
+}
+
+// --- Onboarding state -----------------------------------------------------
+//
+// Kept on the business rather than in memory because setup is a
+// conversation the seller can walk away from. Closing Telegram halfway
+// through and coming back tomorrow must resume, not restart.
+
+export interface OnboardingState {
+  step: OnboardingStep;
+  kindId: string | null;
+  name: string;
+}
+
+export async function loadOnboarding(businessId: string): Promise<OnboardingState> {
+  const rows = (await rest(
+    `businesses?id=eq.${businessId}&limit=1&select=name,onboarding_step,business_kind`,
+  )) as { name: string; onboarding_step: string | null; business_kind: string | null }[];
+  const row = rows[0];
+
+  // No row means something is wrong upstream, not that a new seller needs
+  // setting up. Never open a questionnaire on the strength of a failed read.
+  if (!row) return { step: "done", kindId: null, name: "My Business" };
+
+  return {
+    step: asOnboardingStep(row.onboarding_step),
+    kindId: row.business_kind,
+    name: row.name,
+  };
+}
+
+export async function setOnboardingStep(
+  businessId: string,
+  step: OnboardingStep,
+): Promise<void> {
+  await rest(`businesses?id=eq.${businessId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ onboarding_step: step }),
+  });
+}
+
+// The kind and the bill style it implies are written together: the style
+// is the only reason the question is worth asking, so they must never
+// disagree.
+export async function setBusinessKind(
+  businessId: string,
+  kindId: string,
+  template: TemplateId,
+): Promise<void> {
+  await rest(`businesses?id=eq.${businessId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ business_kind: kindId, bill_template: template }),
+  });
 }

@@ -15,6 +15,8 @@ import {
   addItemToBill,
   removeItemFromBill,
   getBillByNo,
+  getLatestBillForCustomer,
+  setBillCustomer,
   recordPayment,
   setItemQuantity,
   getOpenBills,
@@ -23,14 +25,28 @@ import {
 } from "./billStore.js";
 import { buildCatalogIndex, findProduct, CatalogResolutionError } from "./catalog.js";
 import { classifyIntent } from "./intent.js";
-import { parsePriceList } from "./priceList.js";
+import { parsePriceList, readsAsPriceList } from "./priceList.js";
 import { formatBusinessDateTime, parseDateRange } from "./businessDay.js";
-import { loadBusinessProfile, setBillTemplate, setBusinessField, isEditableField, EDITABLE_FIELDS } from "./businessProfile.js";
+import {
+  loadBusinessProfile, setBillTemplate, setBusinessField, isEditableField, EDITABLE_FIELDS,
+  loadOnboarding, setOnboardingStep, setBusinessKind, type OnboardingState,
+} from "./businessProfile.js";
+import {
+  kindById, decodeKind, readBusinessKind, readShopName, looksLikeAnOrder,
+  isSkip, welcomeQuestion, nameQuestion, pricesQuestion, pricesRetry, finishedMessage,
+  orderBeforePricesQuestion,
+  skippedMessage, SKIP_ACTION, FORMAT_ACTION, SHOP_ACTION, type BusinessKind,
+} from "./onboarding.js";
+import {
+  CustomerAmbiguousError, findCustomer, loadCustomerHistory, listOutstanding,
+} from "./customerStore.js";
 import { toBillData } from "./billRender.js";
 import { renderBill } from "./templates/index.js";
 import { htmlToPdf, PdfUnavailableError } from "./billPdf.js";
 import { TEMPLATE_IDS, TEMPLATE_LABELS, asTemplateId } from "./billData.js";
 import { renderPreviews, previewData } from "./billPreviews.js";
+import { renderBillText, needsMonospace, escapeHtml, TEXT_STYLES, type TextStyle } from "./billText.js";
+import { SAMPLE_BILL } from "./billSamples.js";
 
 // Platform-independent command routing. Telegram polling (telegramBot.ts)
 // and the HTTP API used by n8n (apiServer.ts) both call handleIncoming(),
@@ -62,6 +78,13 @@ export interface ReplyDocument {
 
 export interface Reply {
   text: string;
+  // "HTML" lets a reply use <pre>, which is the only way Telegram will
+  // render a text table in a fixed-width font.
+  parseMode?: "HTML";
+  // Extra messages sent after this one. Used by /mock, which has to show
+  // several styles as SEPARATE bubbles — one message cannot be half
+  // proportional and half monospace.
+  follow?: Reply[];
   actions?: ReplyAction[];
   // Images to send before the text — used by the template picker, so the
   // seller compares actual bills rather than six words.
@@ -197,7 +220,9 @@ When a name could mean two things I ask once and remember your answer:
   what have you learned    see what you've taught me
   forget paner             undo one
 
-Buttons on each bill do the same thing.`;
+Buttons on each bill do the same thing.
+
+  setup                    redo your shop setup`;
 
 // Saves prices in whatever shape the seller typed them - see priceList.ts.
 // Partial success is deliberate: an unreadable fragment must never discard
@@ -476,10 +501,14 @@ async function handleBillFormat(
 
 // Renders a stored bill through the chosen template and returns a PDF.
 // The bill already exists as a record; this only draws it.
-async function handleBillPdf(businessId: string, billNo: number | null): Promise<Reply> {
-  const bill = await resolveBill(businessId, billNo);
+async function handleBillPdf(
+  businessId: string,
+  billNo: number | null,
+  customer: string | null = null,
+): Promise<Reply> {
+  const bill = await resolveBill(businessId, billNo, customer);
   if (!bill) {
-    return { text: "No bill to export. Send me an order and I'll make one." };
+    return { text: noBillFor(customer, "No bill to export. Send me an order and I'll make one.") };
   }
 
   const business = await loadBusinessProfile(businessId);
@@ -539,6 +568,243 @@ async function handleBusinessInfo(businessId: string, args: string): Promise<Rep
   };
 }
 
+// --- Setup ---------------------------------------------------------------
+//
+// onboarding.ts decides WHAT to ask and how to read an answer; this is the
+// half that touches the database. See that file for why these three
+// questions and no more.
+
+async function applyKind(businessId: string, kind: BusinessKind): Promise<Reply> {
+  await setBusinessKind(businessId, kind.id, kind.template);
+  await setOnboardingStep(businessId, "name");
+  return nameQuestion(kind);
+}
+
+async function handleRestartSetup(businessId: string): Promise<Reply> {
+  await setOnboardingStep(businessId, "kind");
+  return welcomeQuestion(false);
+}
+
+async function handleSkipSetup(businessId: string): Promise<Reply> {
+  const state = await loadOnboarding(businessId);
+  await setOnboardingStep(businessId, "done");
+  return { text: skippedMessage(state.step) };
+}
+
+// Runs INSTEAD of the normal intent layer while setup is unfinished. A new
+// seller has no prices, so every other path could only tell them what is
+// missing; asking three questions first is the shorter route to their
+// first real bill.
+async function handleOnboarding(
+  businessId: string,
+  state: OnboardingState,
+  incoming: IncomingMessage,
+  text: string,
+  sourceMessageId: string | null,
+): Promise<Reply> {
+  const kind = kindById(state.kindId);
+  const [first] = splitCommands(text);
+
+  // Only these two commands are honoured mid-setup. Everything else is
+  // read as an answer to the current question, which is what lets
+  // "/add paneer 220" work as the reply to the price question.
+  if (first?.command === "/help") return { text: HELP };
+  if (first?.command === "/setup") return await handleRestartSetup(businessId);
+
+  if (isSkip(text)) {
+    await setOnboardingStep(businessId, "done");
+    return { text: skippedMessage(state.step) };
+  }
+
+  switch (state.step) {
+    case "kind": {
+      const picked = readBusinessKind(text);
+      if (picked) return await applyKind(businessId, picked);
+
+      // A seller who opens the bot and immediately types an order wants a
+      // bill, not a questionnaire. Being made to finish setup first is how
+      // this loses to a notebook.
+      if (looksLikeAnOrder(text)) {
+        const catalog = await loadCatalog(businessId);
+        if (catalog.products.length > 0) {
+          await setOnboardingStep(businessId, "done");
+          return await handleOrder(businessId, text, sourceMessageId, incoming.onSlowWork);
+        }
+        // Nothing priced means the order genuinely cannot be billed. Skip
+        // the remaining questions down to the only one that unblocks it.
+        await setOnboardingStep(businessId, "prices");
+        return orderBeforePricesQuestion(kind);
+      }
+
+      const opening =
+        first?.command === "/start" ||
+        text.length === 0 ||
+        classifyIntent(text).name === "greeting";
+      return welcomeQuestion(!opening);
+    }
+
+    case "name": {
+      const read = readShopName(text);
+      if ("problem" in read) return nameQuestion(kind, read.problem);
+      await setBusinessField(businessId, "name", read.name);
+      await setOnboardingStep(businessId, "prices");
+      return pricesQuestion(kind, read.name);
+    }
+
+    case "prices": {
+      // "/add paneer 220" is the right answer, typed with a command the
+      // seller may have seen in /help. Strip it rather than reject it.
+      const args = text.replace(/^\/add\s*/i, "").trim();
+
+      // Setup only finishes if this message actually saved something. The
+      // count is compared rather than trusting the reply text, because
+      // handleAdd deliberately reports partial success.
+      const before = await loadCatalog(businessId);
+      const saved = await handleAdd(businessId, args);
+      const after = await loadCatalog(businessId);
+
+      if (after.products.length <= before.products.length) {
+        const said = saved.text.trim();
+        return {
+          text: said.length > 0 ? `${said}\n\n${pricesRetry(kind)}` : pricesRetry(kind),
+          actions: [
+            ...(saved.actions ?? []),
+            { label: "Skip \u2014 I'll add them later", action: SKIP_ACTION },
+          ],
+        };
+      }
+
+      await setOnboardingStep(businessId, "done");
+      const done = finishedMessage(kind, state.name, after.products.map((p) => p.name));
+      // handleAdd may have flagged a typo or a near-duplicate. Those taps
+      // are about the prices just saved, so they come first.
+      return {
+        text: `${saved.text}\n\n${done.text}`,
+        actions: [...(saved.actions ?? []), ...(done.actions ?? [])].slice(0, 6),
+      };
+    }
+
+    default:
+      return { text: HELP };
+  }
+}
+
+// Shows each text-bill style as a real chat bubble, using the seller's own
+// last order where they have one. The point is to see it at phone width in
+// the actual app — a description of "aligned columns" tells you nothing
+// about whether the columns line up on YOUR screen.
+async function handleMock(businessId: string): Promise<Reply> {
+  const business = await loadBusinessProfile(businessId);
+  const lastBill = await getCurrentDraft(businessId);
+  const data = lastBill && lastBill.items.length > 0
+    ? toBillData(lastBill, business)
+    : { ...SAMPLE_BILL, business: { ...SAMPLE_BILL.business, name: business.name }, taxes: [], total: 400, subtotal: 400, amountPaid: 400 };
+
+  const bubbles: Reply[] = TEXT_STYLES.map((style) => {
+    const rendered = renderBillText(data, style.id);
+    const label = `${style.name.toUpperCase()} — ${style.note}`;
+    return needsMonospace(style.id)
+      ? { text: `${label}\n<pre>${escapeHtml(rendered)}</pre>`, parseMode: "HTML" as const }
+      : { text: `${label}\n\n${rendered}` };
+  });
+
+  const [first, ...rest] = bubbles;
+  return {
+    ...first!,
+    follow: [
+      ...rest,
+      {
+        text:
+          "Which one? Tap to use it for every bill from now on.\n\n" +
+          "PLAIN is what you have today: the columns are padded, but Telegram " +
+          "draws them in a proportional font so the padding is ignored.",
+        actions: TEXT_STYLES.map((style) => ({
+          label: style.name,
+          action: `txt:${style.id}`,
+        })),
+      },
+    ],
+  };
+}
+
+// --- Customer history ----------------------------------------------------
+//
+// RULE: reading history NEVER writes. It cannot create a customer, open a
+// draft, or change a total. That is what makes a bare name safe to type.
+
+function billLine(bill: {
+  bill_no: number; total: string | number; amount_paid: string | number;
+  payment_status: string; status: string; created_at: string; finalized_at: string | null;
+}): string {
+  const when = formatBusinessDateTime(new Date(bill.finalized_at ?? bill.created_at));
+  const money = formatRupees(Number(bill.total));
+  const mark =
+    bill.status !== "finalized" ? "  · draft"
+    : bill.payment_status === "paid" ? ""
+    : bill.payment_status === "partial"
+      ? `  · ${formatRupees(Number(bill.total) - Number(bill.amount_paid))} due`
+      : "  · unpaid";
+  return `#${bill.bill_no}  ${when}\n   ${money}${mark}`;
+}
+
+async function handleCustomerHistory(businessId: string, name: string): Promise<Reply> {
+  const customer = await findCustomer(businessId, name);
+  if (!customer) {
+    return {
+      text:
+        `I don't have anyone called "${name}" yet.\n\n` +
+        `They'll appear here after their first bill. Send one like:\n  ${name} 2 chai`,
+    };
+  }
+
+  const history = await loadCustomerHistory(businessId, customer);
+  if (history.bills.length === 0) {
+    return { text: `${titleCase(customer.name)} has no bills yet.` };
+  }
+
+  const head = [`${titleCase(customer.name)}`, ""];
+  if (history.billCount > 0) {
+    head.push(
+      `${history.billCount} bill${history.billCount === 1 ? "" : "s"} · ${formatRupees(history.lifetimeTotal)} lifetime` +
+        (history.outstanding > 0 ? `\n${formatRupees(history.outstanding)} still owed` : " · all paid"),
+      "",
+    );
+  }
+
+  const lines = history.bills.map(billLine);
+  const more = history.billCount > history.bills.length;
+
+  return {
+    text:
+      [...head, ...lines].join("\n") +
+      (more ? `\n\nShowing the last ${history.bills.length}.` : "") +
+      `\n\nOpen one with "show #${history.bills[0]!.bill_no}".`,
+    // The most recent few, tappable — scrolling a chat to find a number and
+    // then typing it back is work the buttons can do.
+    actions: history.bills.slice(0, 4).map((b) => ({
+      label: `#${b.bill_no} · ${formatRupees(Number(b.total))}`,
+      action: `open:${b.bill_no}`,
+    })),
+  };
+}
+
+async function handleOutstanding(businessId: string): Promise<Reply> {
+  const owing = await listOutstanding(businessId);
+  if (owing.length === 0) {
+    return { text: "Nobody owes you anything. Every confirmed bill is paid." };
+  }
+  const total = owing.reduce((sum, o) => sum + o.outstanding, 0);
+  const lines = owing
+    .slice(0, 15)
+    .map((o) => `${titleCase(o.name)}\n   ${formatRupees(o.outstanding)} · ${o.billCount} bill${o.billCount === 1 ? "" : "s"}`);
+  return {
+    text:
+      `${formatRupees(Math.round(total * 100) / 100)} owed across ${owing.length} customer${owing.length === 1 ? "" : "s"}\n\n` +
+      lines.join("\n") +
+      (owing.length > 15 ? `\n\nShowing the top 15.` : ""),
+  };
+}
+
 async function handlePrices(businessId: string): Promise<string> {
   const catalog = await loadCatalog(businessId);
   if (catalog.products.length === 0) {
@@ -569,6 +835,12 @@ async function handleOrder(
   const catalog = await loadCatalog(businessId);
 
   if (catalog.products.length === 0) {
+    // With nothing priced, "paneer 220" is the seller answering the very
+    // message that asked for their rates — not an order for one paneer at
+    // ₹220. Telling them to send rates and then billing those rates as an
+    // order is a loop with no way out of it.
+    if (readsAsPriceList(text)) return await handleAdd(businessId, text);
+
     return {
       text:
         "Your price list is empty, so I can only bill orders that include prices.\n\n" +
@@ -584,7 +856,14 @@ async function handleOrder(
     // at, edited and updated later. This is what makes it a transaction
     // rather than a one-off message.
     const stored = await createBillSession(businessId, parsed, bill, sourceMessageId);
-    return { text: renderStoredBill(stored), actions: billActions(stored) };
+    // An anonymous bill is a hole in the business's memory: it can never
+    // be looked up by name, chased for payment, or counted toward what a
+    // customer owes. Asked ONCE, here, rather than on every later render —
+    // a nudge that repeats becomes noise the seller learns to ignore.
+    const nudge = stored.session.customer_ref
+      ? ""
+      : "\n\nWho is this for? Say: this is Ravi";
+    return { text: `${renderStoredBill(stored)}${nudge}`, actions: billActions(stored) };
   } catch (err) {
     // An ambiguous name is a question with a known set of answers. Offer
     // them, and remember the message so the answer can re-run it — being
@@ -693,16 +972,84 @@ async function handleShowBill(businessId: string): Promise<Reply> {
   return { text: renderStoredBill(draft), actions: billActions(draft) };
 }
 
-// Resolves which bill the seller means: the one they named ("#1042"), or
-// the one they're currently working on. Never guesses across businesses.
-async function resolveBill(businessId: string, billNo: number | null): Promise<StoredBill | null> {
+// Resolves which bill the seller means: the one they numbered ("#1042"),
+// the one belonging to the customer they named ("open ravi bill"), or the
+// one they're currently working on. Never guesses across businesses.
+//
+// The customer branch is a HARD address, not a hint. When Ravi has no
+// bill this returns null and the caller says so; it must never slide back
+// to getCurrentDraft, which is how "open ravi bill" answered with a
+// different customer's #1009 — and, on the payment path, would have
+// marked the wrong person's bill paid.
+async function resolveBill(
+  businessId: string,
+  billNo: number | null,
+  customer: string | null = null,
+): Promise<StoredBill | null> {
   if (billNo !== null) return getBillByNo(businessId, billNo);
+  if (customer) return getLatestBillForCustomer(businessId, customer);
   return getCurrentDraft(businessId);
 }
 
-async function handleConfirm(businessId: string, billNo: number | null): Promise<Reply> {
+// Names the customers the seller could have meant. The alternative — a
+// flat "I don't have a bill for Ravi" when two Ravis exist — is worse than
+// unhelpful: it reads as though their records are gone.
+function askWhichCustomer(err: CustomerAmbiguousError): Reply {
+  const names = err.candidates.map(titleCase);
+  return {
+    text:
+      `You have ${names.length} customers matching that:\n` +
+      names.map((n) => `  \u2022 ${n}`).join("\n") +
+      `\n\nWhich one? Say the full name, like: ${names[0]}`,
+  };
+}
+
+// "I don't have a bill for Ravi" beats "no open bill" when the seller
+// named someone: it tells them WHICH assumption of theirs was wrong.
+function noBillFor(customer: string | null, fallback: string): string {
+  return customer
+    ? `I don't have a bill for ${titleCase(customer)}. Say "open bills" to see what's unconfirmed.`
+    : fallback;
+}
+
+// Attaches a customer to a bill. Only ever adds the identity that was
+// missing — it never touches items, quantities or money, so naming a bill
+// cannot change what it is worth.
+async function handleSetCustomer(
+  businessId: string,
+  billNo: number | null,
+  customer: string | null,
+): Promise<Reply> {
+  if (!customer) {
+    return { text: "Who is this bill for? Say: this is Ravi" };
+  }
+
   const bill = await resolveBill(businessId, billNo);
-  if (!bill) return { text: "No open bill to confirm. Send me an order and I'll make one." };
+  if (!bill) {
+    return { text: "No open bill to name. Send me an order and I'll make one." };
+  }
+
+  const updated = await setBillCustomer(businessId, bill.session.id, customer);
+  if (!updated) return { text: "Couldn't use that as a customer name." };
+
+  const who = titleCase(updated.session.customer_ref ?? customer);
+  return {
+    text: `Bill #${updated.session.bill_no} is ${who}'s.\n\n${renderStoredBill(updated)}`,
+    actions: billActions(updated),
+  };
+}
+
+async function handleConfirm(
+  businessId: string,
+  billNo: number | null,
+  customer: string | null = null,
+): Promise<Reply> {
+  const bill = await resolveBill(businessId, billNo, customer);
+  if (!bill) {
+    return {
+      text: noBillFor(customer, "No open bill to confirm. Send me an order and I'll make one."),
+    };
+  }
   if (bill.session.status === "finalized") {
     return { text: `Bill #${bill.session.bill_no} is already confirmed.`, actions: billActions(bill) };
   }
@@ -730,10 +1077,16 @@ async function handlePayment(
   businessId: string,
   billNo: number | null,
   amount: number | null,
+  customer: string | null = null,
 ): Promise<Reply> {
-  const bill = await resolveBill(businessId, billNo);
+  const bill = await resolveBill(businessId, billNo, customer);
   if (!bill) {
-    return { text: "Which bill was paid? Tell me the number, like: #1042 paid" };
+    return {
+      text: noBillFor(
+        customer,
+        "Which bill was paid? Tell me the number, like: #1042 paid",
+      ),
+    };
   }
 
   const updated = await recordPayment(bill.session.id, amount);
@@ -871,7 +1224,7 @@ const KNOWN_COMMANDS = [
   "/start", "/help", "/add", "/prices", "/list", "/remove",
   "/zbill", "/plus", "/additem", "/minus", "/removeitem",
   "/bill", "/done", "/sales", "/paid", "/open", "/rename", "/learned", "/forget",
-  "/format", "/style", "/shop", "/pdf",
+  "/format", "/style", "/shop", "/pdf", "/setup", "/mock",
 ];
 
 // Telegram caps callback_data at 64 BYTES. A rename carries two arbitrary
@@ -1012,8 +1365,31 @@ export async function handleIncoming(incoming: IncomingMessage): Promise<Reply> 
 
   const commands = splitCommands(trimmed);
 
+  // RULE 1: A COMMAND ALWAYS RUNS.
+  //
+  // Setup used to sit above this and swallow everything, so during setup
+  // "/prices" was saved as a product called "/prices", and "2 paneer 3
+  // samosa" - an ORDER - became two price-list rows. A seller could not
+  // reach /help to get out of it.
+  //
+  // Nothing may ever sit above command routing again. A slash command is
+  // the one input whose meaning is not in question, so it is never
+  // interpreted by whatever mode the seller happens to be in.
+  const isCommand = commands.length > 1 || (commands[0] && commands[0].command !== "");
+
+  if (!isCommand) {
+    try {
+      const onboarding = await loadOnboarding(businessId);
+      if (onboarding.step !== "done") {
+        return await handleOnboarding(businessId, onboarding, incoming, trimmed, sourceMessageId);
+      }
+    } catch (err) {
+      return { text: `Something went wrong: ${(err as Error).message}` };
+    }
+  }
+
   // Explicit commands still win — a seller who typed one meant it.
-  if (commands.length > 1 || (commands[0] && commands[0].command !== "")) {
+  if (isCommand) {
     const replies: Reply[] = [];
     for (const c of commands) {
       replies.push(await runCommand(businessId, incoming, c.command, c.args, trimmed, sourceMessageId));
@@ -1043,6 +1419,8 @@ async function runIntent(
     switch (intent.name) {
       case "help":
         return { text: HELP };
+      case "setup":
+        return await handleRestartSetup(businessId);
       case "greeting":
         return { text: GREETING_REPLY };
       case "prices":
@@ -1052,28 +1430,34 @@ async function runIntent(
       case "open_bills":
         return await handleOpenBills(businessId);
       case "show_bill": {
-        const bill = await resolveBill(businessId, intent.billNo);
+        const bill = await resolveBill(businessId, intent.billNo, intent.customer);
         if (!bill) {
           return {
             text: intent.billNo
               ? `I don't have a bill #${intent.billNo}.`
-              : "No open bill. Send me an order and I'll make one.",
+              : noBillFor(intent.customer, "No open bill. Send me an order and I'll make one."),
           };
         }
         return { text: renderStoredBill(bill), actions: billActions(bill) };
       }
       case "confirm":
-        return await handleConfirm(businessId, intent.billNo);
+        return await handleConfirm(businessId, intent.billNo, intent.customer);
       case "payment":
-        return await handlePayment(businessId, intent.billNo, intent.amount);
+        return await handlePayment(businessId, intent.billNo, intent.amount, intent.customer);
       case "pdf":
         return { text: "PDF export isn't ready yet — the bill above is the record for now." };
+      case "customer_history":
+        return await handleCustomerHistory(businessId, intent.text);
+      case "outstanding":
+        return await handleOutstanding(businessId);
+      case "mock":
+        return await handleMock(businessId);
       case "bill_format":
         return await handleBillFormat(businessId, incoming.onSlowWork);
       case "business_info":
         return await handleBusinessInfo(businessId, intent.text);
       case "pdf":
-        return await handleBillPdf(businessId, intent.billNo);
+        return await handleBillPdf(businessId, intent.billNo, intent.customer);
       case "learned":
         return await handleLearned(businessId);
       case "forget":
@@ -1086,13 +1470,31 @@ async function runIntent(
         return await handleAddItem(businessId, intent.text);
       case "remove_item":
         return await handleRemoveItem(businessId, intent.text);
+      case "set_customer":
+        return await handleSetCustomer(businessId, intent.billNo, intent.customer);
       case "correction":
         return await handleCorrection(businessId, text);
       case "order":
-      default:
+      default: {
+        // RULE: a bare name is a QUESTION, never an instruction.
+        //
+        // "ravi" has no items in it, so reading it as an order could only
+        // ever produce an empty bill. If it names someone the seller has
+        // billed before, show that person instead. The digit test does the
+        // separating: "ravi" looks them up, "ravi 2 chai" bills them.
+        const words = text.trim().split(/\s+/);
+        if (!/\d/.test(text) && words.length <= 3) {
+          const known = await findCustomer(businessId, text.trim());
+          if (known) return await handleCustomerHistory(businessId, known.name);
+        }
         return await handleOrder(businessId, text, sourceMessageId, incoming.onSlowWork);
+      }
     }
   } catch (err) {
+    // Caught here rather than in each handler: show_bill, payment, confirm
+    // and pdf all address a bill by name, and all owe the seller the same
+    // answer when that name fits two people.
+    if (err instanceof CustomerAmbiguousError) return askWhichCustomer(err);
     return { text: `Something went wrong: ${(err as Error).message}` };
   }
 }
@@ -1113,6 +1515,38 @@ export async function handleAction(incoming: IncomingMessage, action: string): P
   // priced. The seller taught their own price list; the same question is
   // never asked again, because buildCatalogIndex treats an alias as an
   // exact key.
+  // Setup taps. Decoded first: they carry a kind or a bare verb rather
+  // than a bill number, so the number-based decoding below cannot see them.
+  const kind = decodeKind(action);
+  if (kind) {
+    try {
+      return await applyKind(businessId, kind);
+    } catch (err) {
+      return { text: `Something went wrong: ${(err as Error).message}` };
+    }
+  }
+
+  if (action === SKIP_ACTION || action === FORMAT_ACTION || action === SHOP_ACTION) {
+    try {
+      if (action === SKIP_ACTION) return await handleSkipSetup(businessId);
+      if (action === FORMAT_ACTION) return await handleBillFormat(businessId, incoming.onSlowWork);
+      return await handleBusinessInfo(businessId, "");
+    } catch (err) {
+      return { text: `Something went wrong: ${(err as Error).message}` };
+    }
+  }
+
+  const [openVerb, openNo] = action.split(":");
+  if (openVerb === "open" && openNo && /^\d+$/.test(openNo)) {
+    try {
+      const bill = await getBillByNo(businessId, Number(openNo));
+      if (!bill) return { text: `I don't have a bill #${openNo}.` };
+      return { text: renderStoredBill(bill), actions: billActions(bill) };
+    } catch (err) {
+      return { text: `Something went wrong: ${(err as Error).message}` };
+    }
+  }
+
   const templateId = decodeTemplate(action);
   if (templateId) {
     try {
@@ -1218,6 +1652,8 @@ async function runCommand(
       case "/start":
       case "/help":
         return { text: HELP };
+      case "/setup":
+        return await handleRestartSetup(businessId);
       case "/add":
         return await handleAdd(businessId, args);
       case "/prices":
@@ -1227,6 +1663,8 @@ async function runCommand(
         return { text: await handleRemove(businessId, args) };
       case "/rename":
         return await handleRename(businessId, args);
+      case "/mock":
+        return await handleMock(businessId);
       case "/format":
       case "/style":
         return await handleBillFormat(businessId, onSlowWork);

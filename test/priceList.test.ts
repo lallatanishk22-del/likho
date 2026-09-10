@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parsePriceList } from "../src/priceList.js";
+import { parsePriceList, readsAsPriceList } from "../src/priceList.js";
 
 const entries = (t: string) => parsePriceList(t).entries;
 
@@ -115,4 +115,42 @@ test("empty input yields nothing, not an error", () => {
 
 test("free price is allowed", () => {
   assert.deepEqual(entries("water 0"), [{ name: "water", price: 0 }]);
+});
+
+
+// --- Rates or an order? ---------------------------------------------------
+// readsAsPriceList runs in exactly one place: a seller whose price list is
+// empty. Reading an order as rates would save a customer's name as a
+// product; reading rates as an order loops them forever on "your price
+// list is empty". Both are worse than asking, so it only answers when the
+// shape is unambiguous.
+
+test("name first, price last is a rate", () => {
+  assert.ok(readsAsPriceList("paneer 220"));
+  assert.ok(readsAsPriceList("full dabba 120"));
+  assert.ok(readsAsPriceList("paneer 220, lassi 80"));
+  assert.ok(readsAsPriceList("paneer 220\nlassi 80\nsamosa 20"));
+});
+
+test("quantity first is an order, never a rate", () => {
+  // "2 paneer" as a rate would price paneer at ₹2 for every future bill.
+  assert.equal(readsAsPriceList("2 paneer"), false);
+  assert.equal(readsAsPriceList("150 panner"), false);
+});
+
+test("a customer name in front makes it an order", () => {
+  assert.equal(readsAsPriceList("Ravi 2 paneer 220"), false);
+  assert.equal(readsAsPriceList("Ravi 2 paneer 1 lassi"), false);
+});
+
+test("a bare name or a bare number is neither", () => {
+  assert.equal(readsAsPriceList("paneer"), false);
+  assert.equal(readsAsPriceList("220"), false);
+  assert.equal(readsAsPriceList(""), false);
+});
+
+test("one bad line disqualifies the whole message", () => {
+  // Partial acceptance here would save half a message the seller meant as
+  // one thing, with no sign of which half.
+  assert.equal(readsAsPriceList("paneer 220\n2 lassi"), false);
 });

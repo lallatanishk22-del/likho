@@ -127,3 +127,34 @@ export function parsePriceList(text: string): PriceListParse {
 
   return { entries: [...deduped.values()], unreadable };
 }
+
+// Whether a message is UNAMBIGUOUSLY a price list rather than an order.
+//
+// Used only where the two could otherwise be confused: a seller with an
+// empty price list who types "paneer 220" is answering the message that
+// asked for their rates, not ordering one paneer. Getting this wrong in
+// either direction is a financial error, so the test is deliberately
+// stricter than parsePriceList itself:
+//
+//   paneer 220              -> rates (name first, price last)
+//   paneer 220, lassi 80    -> rates
+//   2 paneer                -> ORDER. Price-first is legal in an explicit
+//                              /add, but here it would save paneer at ₹2.
+//   Ravi 2 paneer 220       -> ORDER. Two entries on one line.
+export function readsAsPriceList(text: string): boolean {
+  const lines = text
+    .split(/[\r\n,;]+/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  if (lines.length === 0) return false;
+
+  return lines.every((line) => {
+    const tokens = line.split(/\s+/).filter((t) => t.length > 0);
+    if (tokens.length < 2) return false;
+    if (priceOf(tokens[0]!) !== null) return false;
+    if (priceOf(tokens[tokens.length - 1]!) === null) return false;
+
+    const { entries, unreadable } = parseLine(line);
+    return entries.length === 1 && unreadable.length === 0;
+  });
+}

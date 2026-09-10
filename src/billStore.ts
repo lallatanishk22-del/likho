@@ -2,6 +2,7 @@ import type { Bill } from "./types.js";
 import type { ParsedOrder } from "./structuredOrder.js";
 import { rest } from "./catalogStore.js";
 import { startOfBusinessDay, type DateRange } from "./businessDay.js";
+import { findCustomer, findOrCreateCustomer } from "./customerStore.js";
 
 // Persistence for BillSession — the durable, versioned state that turns a
 // one-shot reply into something the seller can come back to, edit, and
@@ -17,7 +18,11 @@ export interface BillSessionRow {
   // Per-business sequential transaction identity (#1042). Allocated
   // atomically in Postgres, never derived from the UUID.
   bill_no: number;
+  // The name as the seller wrote it on THIS bill — a snapshot, kept for
+  // the same reason unit_price is: an old bill must not be rewritten by a
+  // later change. customer_id is the durable identity it points at.
   customer_ref: string | null;
+  customer_id: string | null;
   status: BillStatus;
   version: number;
   subtotal: string | number;
@@ -90,12 +95,20 @@ export async function createBillSession(
 ): Promise<StoredBill> {
   const billNo = await allocateBillNo(businessId);
 
+  // A customer record is created the first time a name appears on a bill.
+  // This is the whole "the CRM builds itself" mechanic: the seller never
+  // adds a customer, they just bill one.
+  const customer = parsed.customer
+    ? await findOrCreateCustomer(businessId, parsed.customer)
+    : null;
+
   const created = (await rest("bill_sessions", {
     method: "POST",
     body: JSON.stringify({
       business_id: businessId,
       bill_no: billNo,
       customer_ref: parsed.customer,
+      customer_id: customer?.id ?? null,
       source_message_id: sourceMessageId,
       last_checked_message_id: sourceMessageId,
       status: "draft",
@@ -366,6 +379,70 @@ export async function getBillByNo(
     `bill_items?bill_session_id=eq.${session.id}&order=position.asc&select=*`,
   )) as BillItemRow[];
   return { session, items };
+}
+
+// Looks a bill up by the CUSTOMER the seller named ("open ravi bill").
+//
+// Two steps, deliberately: resolve the NAME to a customer record, then
+// find that record's bills. Matching happens once, in customerStore,
+// against the seller's actual customer list — not against whatever names
+// happen to appear on recent bills.
+//
+// Returns null when that customer has no bill. That null matters: the
+// caller must say "no bill for Ravi" rather than fall back to whatever
+// draft happens to be open, which is how "open ravi bill" once answered
+// with a different customer's transaction — and, on the payment path,
+// would have marked the wrong person's bill paid.
+export async function getLatestBillForCustomer(
+  businessId: string,
+  customer: string,
+): Promise<StoredBill | null> {
+  const match = await findCustomer(businessId, customer);
+  if (!match) return null;
+
+  const sessions = (await rest(
+    `bill_sessions?business_id=eq.${businessId}&customer_id=eq.${match.id}` +
+      `&order=updated_at.desc&limit=1&select=*`,
+  )) as BillSessionRow[];
+  if (sessions.length === 0) return null;
+  const session = sessions[0]!;
+
+  const items = (await rest(
+    `bill_items?bill_session_id=eq.${session.id}&order=position.asc&select=*`,
+  )) as BillItemRow[];
+  return { session, items };
+}
+
+// Every bill for one customer, newest first — their order history, and
+// what "what does Ravi owe" will be answered from.
+export async function getBillsForCustomer(
+  businessId: string,
+  customerId: string,
+): Promise<BillSessionRow[]> {
+  return (await rest(
+    `bill_sessions?business_id=eq.${businessId}&customer_id=eq.${customerId}` +
+      `&order=created_at.desc&select=*`,
+  )) as BillSessionRow[];
+}
+
+// Attaches a name to a bill that was created without one, and creates the
+// customer record if this is the first time they appear. Both fields move
+// together: the snapshot the bill shows and the identity it points at can
+// never disagree.
+export async function setBillCustomer(
+  businessId: string,
+  sessionId: string,
+  name: string,
+): Promise<StoredBill | null> {
+  const customer = await findOrCreateCustomer(businessId, name);
+  if (!customer) return null;
+
+  await rest(`bill_sessions?id=eq.${sessionId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ customer_ref: customer.name, customer_id: customer.id }),
+  });
+
+  return recalculateBill(sessionId, "manual_edit");
 }
 
 // Records a payment against a bill. The status is DERIVED from the amounts

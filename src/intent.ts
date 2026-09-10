@@ -14,6 +14,7 @@
 
 export type IntentName =
   | "help"
+  | "setup"
   | "greeting"
   | "show_bill"
   | "confirm"
@@ -25,11 +26,15 @@ export type IntentName =
   | "correction"
   | "rename"
   | "bill_format"
+  | "mock"
+  | "customer_history"
+  | "outstanding"
   | "business_info"
   | "learned"
   | "forget"
   | "add_item"
   | "remove_item"
+  | "set_customer"
   | "order";
 
 export interface Intent {
@@ -42,6 +47,11 @@ export interface Intent {
   billNo: number | null;
   // Rupee amount stated with a payment intent ("Ravi paid 500").
   amount: number | null;
+  // Customer the seller named ("open ravi bill", "ravi paid 500"). Null
+  // means they didn't name one, i.e. "the bill I'm working on". Never
+  // treat these two as the same: a named customer with no bill is an
+  // answer ("no bill for Ravi"), not a licence to show someone else's.
+  customer: string | null;
 }
 
 // "#1042" anywhere in the message names a specific transaction.
@@ -56,6 +66,53 @@ function hasWord(text: string, ...words: string[]): boolean {
   return words.some((w) => new RegExp(`(^|[^a-z])${w}([^a-z]|$)`, "i").test(text));
 }
 
+// Words that are part of ASKING, not part of the name. Everything here is
+// stripped from a message so what remains is the customer the seller
+// named — "open ravi bill" leaves "ravi", "show bill" leaves nothing.
+const ASK_WORDS = new Set([
+  "show", "dikha", "dikhao", "dikhado", "dekh", "dekho", "view", "open",
+  "bill", "bills", "billa", "order", "orders", "invoice",
+  "ka", "ki", "ke", "kaa", "ko", "na", "ne", "wala", "wali", "walo",
+  "the", "my", "a", "an", "for", "of", "to", "me", "please", "pls", "plz",
+  "current", "latest", "last", "recent", "this", "that", "is", "was",
+  "paid", "payment", "pay", "settled", "received", "diya", "diye", "de",
+  "rs", "rupees", "rupee", "full", "amount", "cash", "upi", "online",
+  "confirm", "confirmed", "done", "final", "send", "sent", "bhej", "bhejo",
+  "pdf", "print", "export",
+  "i", "you", "we", "us", "it", "give", "get", "want", "need", "check",
+  "made", "make", "bana", "banao", "banaya", "kar", "karo", "kro", "do",
+  "kya", "hai", "hain", "and", "with", "on", "in", "at", "sab",
+]);
+
+// Pulls the customer's name out of a message that is ABOUT a bill.
+// Deliberately conservative: it returns a name only when what is left
+// after removing the asking words reads like one (letters, at most three
+// words). Anything else returns null, which routes back to "the bill I'm
+// working on" — the old behaviour, kept for messages that name nobody.
+export function extractCustomer(text: string): string | null {
+  // Filtered case-INSENSITIVELY but returned with the seller's own casing,
+  // so "Ravi Jerath" is stored as they wrote it. Matching lowercases
+  // later; the record should not.
+  const words = text
+    .replace(/#\s*\d+/g, " ")
+    .replace(/[\u20b9]/g, " ")
+    .replace(/'s\b/gi, " ")
+    .replace(/[^A-Za-z0-9 ]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 0)
+    .filter((w) => !ASK_WORDS.has(w.toLowerCase()))
+    // A number is a quantity, a bill number or an amount — never a name.
+    .filter((w) => !/\d/.test(w))
+    // A lone letter is an initial or a slip, not something to look up.
+    .filter((w) => w.length > 1);
+
+  if (words.length === 0 || words.length > 3) return null;
+  const name = words.join(" ");
+  // One stray letter is a typo, not a customer.
+  if (name.replace(/ /g, "").length < 2) return null;
+  return name;
+}
+
 const GREETINGS = new Set([
   "hi", "hii", "hello", "hey", "yo", "namaste", "namaskar", "hola",
   "thanks", "thank you", "thx", "ty", "ok", "okay", "k", "good morning",
@@ -66,16 +123,42 @@ export function classifyIntent(rawText: string): Intent {
   const text = rawText.trim();
   const lower = text.toLowerCase();
   const billNo = extractBillNo(text);
-  const base = { text, billNo, amount: null as number | null };
+  const base = {
+    text,
+    billNo,
+    amount: null as number | null,
+    customer: null as string | null,
+  };
 
   if (hasWord(lower, "help") || lower === "?" || lower === "start") {
     return { ...base, name: "help" };
+  }
+
+  // Re-running setup. Checked before everything else so "setup" is never
+  // read as a one-word order for a product called "setup".
+  if (/^(setup|set\s*up|start\s*over|onboarding|re-?setup)$/i.test(lower)) {
+    return { ...base, name: "setup" };
   }
 
   // A short message that is ONLY a pleasantry. The length guard matters:
   // "ok 2 paneer" is an order, not an acknowledgement.
   if (GREETINGS.has(lower.replace(/[^a-z ]/g, "").trim()) && !/\d/.test(lower)) {
     return { ...base, name: "greeting" };
+  }
+
+  // --- Who owes money --------------------------------------------------
+  //
+  // Checked BEFORE payment, and this ordering is load-bearing: "who hasn't
+  // paid" contains the word "paid", so the payment intent claimed it and
+  // marked the open bill PAID IN FULL. A question about money became a
+  // change to money. A negated or plural-subject phrase is a REPORT, never
+  // a receipt.
+  if (
+    /\b(who|kaun|kisne)\b/i.test(lower) ||
+    /\b(hasn'?t|has\s+not|haven'?t|have\s+not|nahi|nahin)\s+paid\b/i.test(lower) ||
+    /\b(unpaid|outstanding|udhaar|udhar|baaki|dues?|pending\s+payments?)\b/i.test(lower)
+  ) {
+    return { ...base, name: "outstanding" };
   }
 
   // --- Payment ---------------------------------------------------------
@@ -86,7 +169,11 @@ export function classifyIntent(rawText: string): Intent {
     // Don't read the bill number itself as the amount paid.
     const candidate = amountMatch ? Number(amountMatch[1]) : null;
     const amount = candidate !== null && candidate !== billNo ? candidate : null;
-    return { ...base, name: "payment", amount };
+    return { ...base, name: "payment", amount, customer: extractCustomer(text) };
+  }
+
+  if (/^(mock|preview|sample)\b/i.test(lower)) {
+    return { ...base, name: "mock" };
   }
 
   // Choosing how a bill LOOKS. Checked before "pdf" so "bill format" is
@@ -104,7 +191,7 @@ export function classifyIntent(rawText: string): Intent {
   }
 
   if (hasWord(lower, "pdf", "invoice", "print")) {
-    return { ...base, name: "pdf" };
+    return { ...base, name: "pdf", customer: extractCustomer(text) };
   }
 
   // --- Correction ------------------------------------------------------
@@ -133,6 +220,25 @@ export function classifyIntent(rawText: string): Intent {
   const renameMatch = text.match(/^rename\s+(.+)$/i);
   if (renameMatch) {
     return { ...base, name: "rename", text: renameMatch[1]!.trim() };
+  }
+
+  // Naming a bill that was created without a customer. Without this, a
+  // bill whose message never mentioned anyone stayed anonymous forever —
+  // and most of them are: the seller types "2 paneer 1 lassi" far more
+  // often than they type a name.
+  //
+  // The digit guard is what keeps this from eating orders: "this is 2
+  // paneer" is a person describing food, not naming a customer.
+  // The bill number is removed first so "#1042 this is ravi" names #1042
+  // instead of falling through to the order parser. billNo already holds
+  // it, so nothing is lost by dropping it here.
+  const naming = text.replace(/#\s*\d{3,6}/, " ").trim();
+  const customerMatch =
+    naming.match(/^(?:this is|that'?s|it'?s|its|customer|naam|name)\s*:?\s+(.+)$/i) ??
+    naming.match(/^(.+?)\s+ka\s+(?:bill\s+)?(?:hai|h)$/i);
+  if (customerMatch && !/\d/.test(customerMatch[1]!)) {
+    const named = extractCustomer(customerMatch[1]!);
+    if (named) return { ...base, name: "set_customer", customer: named };
   }
 
   // --- Editing the open bill -------------------------------------------
@@ -178,13 +284,54 @@ export function classifyIntent(rawText: string): Intent {
     (billNo !== null && lower.replace(/#\s*\d+/, "").trim().length === 0)
   ) {
     if (hasWord(lower, "bill", "order") || billNo !== null) {
-      return { ...base, name: "show_bill" };
+      return { ...base, name: "show_bill", customer: extractCustomer(text) };
     }
   }
 
   if (hasWord(lower, "confirm", "done", "send", "sent", "final", "bhej", "ho gaya")) {
     if (!/\d/.test(lower) || billNo !== null) {
-      return { ...base, name: "confirm" };
+      return { ...base, name: "confirm", customer: extractCustomer(text) };
+    }
+  }
+
+  // --- Customer history --------------------------------------------------
+  //
+  // Placed LAST on purpose. "show bill", "open bills" and "open ravi bill"
+  // are all handled above and must keep their meaning; a greedy history
+  // pattern placed earlier swallowed every one of them.
+  //
+  // Two more guards: the captured name may not be a word that belongs to
+  // another intent ("open bills" is not a customer called "open"), and it
+  // may not contain a digit ("ravi 2 chai" is an order, not a lookup).
+  const NOT_A_NAME = new Set([
+    "show", "open", "view", "dekh", "dikha", "see", "get", "list",
+    "my", "the", "this", "that", "a", "all", "todays", "today's", "today",
+    "pending", "unconfirmed", "unpaid", "draft", "drafts", "last", "latest",
+    "current", "recent", "new", "old", "customer", "which", "what",
+  ]);
+
+  const historyMatch =
+    text.match(/^(?:show|open|see|dekh|dikha)\s+(?:me\s+)?(.+?)(?:'?s)?\s+(?:bills|orders|history|khata)$/i) ??
+    text.match(/^(.+?)(?:'?s)?\s+(?:bills|orders|history|khata)$/i) ??
+    text.match(/^(?:history|khata)\s+(?:of\s+|for\s+)?(.+)$/i);
+  if (historyMatch) {
+    const who = historyMatch[1]!.trim();
+    const words = who.toLowerCase().split(/\s+/);
+    const usable =
+      who.length > 0 &&
+      !/\d/.test(who) &&
+      words.length <= 3 &&
+      !words.some((w) => NOT_A_NAME.has(w));
+    if (usable) return { ...base, name: "customer_history", text: who };
+  }
+
+  const owesMatch =
+    text.match(/^how\s+much\s+does\s+(.+?)\s+owes?\b/i) ??
+    text.match(/^(.+?)\s+owes?\b/i);
+  if (owesMatch) {
+    const who = owesMatch[1]!.trim();
+    if (who.length > 0 && !/\d/.test(who) && !NOT_A_NAME.has(who.toLowerCase())) {
+      return { ...base, name: "customer_history", text: who };
     }
   }
 

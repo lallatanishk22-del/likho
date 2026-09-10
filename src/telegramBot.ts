@@ -150,11 +150,21 @@ async function sendReply(chatId: number, reply: Reply): Promise<void> {
     body: JSON.stringify({
       chat_id: chatId,
       text: reply.text,
+      // Only set when the reply actually needs it. A bill table has to be
+      // <pre> to land in a fixed-width font; ordinary replies stay
+      // proportional, which reads better for prose.
+      ...(reply.parseMode ? { parse_mode: reply.parseMode } : {}),
       reply_markup: toInlineKeyboard(reply),
     }),
   });
   if (!response.ok) {
     throw new Error(`sendMessage failed (${response.status}): ${await response.text()}`);
+  }
+
+  // Separate bubbles, sent in order. One message cannot be half
+  // proportional and half monospace, so a comparison needs several.
+  for (const next of reply.follow ?? []) {
+    await sendReply(chatId, next);
   }
 }
 

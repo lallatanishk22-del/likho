@@ -191,3 +191,170 @@ test("'this month sales' is a sales question", () => {
 test("a date in a sales question does not make it an order", () => {
   assert.notEqual(name("sales 8/9"), "order");
 });
+
+// --- Naming a customer ------------------------------------------------
+// The bug this fixes: "open ravi bill" showed the bill that happened to be
+// open (a different customer's #1009), because nothing read the name at
+// all. A named customer is now carried through to the lookup.
+
+test("'open ravi bill' names ravi", () => {
+  const intent = classifyIntent("open ravi bill");
+  assert.equal(intent.name, "show_bill");
+  assert.equal(intent.customer, "ravi");
+});
+
+test("'open ravi jerath bill' keeps the full name", () => {
+  assert.equal(classifyIntent("open ravi jerath bill").customer, "ravi jerath");
+});
+
+// The seller's own capitalisation survives, because it becomes the stored
+// customer record's name. Matching lowercases later; the record does not.
+test("'show Ravi's bill' names Ravi, with their capitalisation kept", () => {
+  assert.equal(classifyIntent("show Ravi's bill").customer, "Ravi");
+});
+
+test("'ravi ka bill dikha' names ravi", () => {
+  assert.equal(classifyIntent("ravi ka bill dikha").customer, "ravi");
+});
+
+test("'show bill' names nobody, so the current draft still resolves", () => {
+  const intent = classifyIntent("show bill");
+  assert.equal(intent.name, "show_bill");
+  assert.equal(intent.customer, null);
+});
+
+test("'show #1042' names nobody — the number is the address", () => {
+  const intent = classifyIntent("show #1042");
+  assert.equal(intent.billNo, 1042);
+  assert.equal(intent.customer, null);
+});
+
+test("'Ravi paid 500' names ravi and keeps the amount", () => {
+  const intent = classifyIntent("Ravi paid 500");
+  assert.equal(intent.name, "payment");
+  assert.equal(intent.amount, 500);
+  assert.equal(intent.customer, "Ravi");
+});
+
+test("'#1042 paid' names nobody, so the number decides which bill", () => {
+  const intent = classifyIntent("#1042 paid");
+  assert.equal(intent.name, "payment");
+  assert.equal(intent.customer, null);
+});
+
+test("'paid 500' with no name leaves the customer null", () => {
+  assert.equal(classifyIntent("paid 500").customer, null);
+});
+
+test("a name is never invented from a long sentence", () => {
+  assert.equal(classifyIntent("show me the last bill i made please").customer, null);
+});
+
+test("'confirm ravi bill' names ravi", () => {
+  const intent = classifyIntent("confirm ravi bill");
+  assert.equal(intent.name, "confirm");
+  assert.equal(intent.customer, "ravi");
+});
+
+test("'ravi bill pdf' names ravi", () => {
+  const intent = classifyIntent("ravi bill pdf");
+  assert.equal(intent.name, "pdf");
+  assert.equal(intent.customer, "ravi");
+});
+
+// --- Naming a bill that has no customer -------------------------------
+// Most bills are typed without a name ("2 paneer 1 lassi"), which left
+// them anonymous forever: unlookupable, unchaseable, invisible to any
+// question about what a customer owes.
+
+test("'this is ravi' names the open bill", () => {
+  const intent = classifyIntent("this is ravi");
+  assert.equal(intent.name, "set_customer");
+  assert.equal(intent.customer, "ravi");
+});
+
+test("'customer ravi jerath' names the open bill", () => {
+  const intent = classifyIntent("customer ravi jerath");
+  assert.equal(intent.name, "set_customer");
+  assert.equal(intent.customer, "ravi jerath");
+});
+
+test("'ravi ka hai' names the open bill", () => {
+  const intent = classifyIntent("ravi ka hai");
+  assert.equal(intent.name, "set_customer");
+  assert.equal(intent.customer, "ravi");
+});
+
+test("'#1042 is ravi' names that specific bill", () => {
+  const intent = classifyIntent("#1042 this is ravi");
+  assert.equal(intent.name, "set_customer");
+  assert.equal(intent.billNo, 1042);
+});
+
+// The guard that keeps naming from swallowing orders.
+test("'this is 2 paneer' is an order, not a customer name", () => {
+  assert.equal(name("this is 2 paneer"), "order");
+});
+
+test("naming never fires on a plain order", () => {
+  assert.equal(name("Ravi 2 paneer 1 lassi"), "order");
+});
+
+test("naming never fires on an item edit", () => {
+  assert.equal(name("add 2 samosa"), "add_item");
+});
+
+// --- Naming must never swallow an order -------------------------------
+// The failure mode this guards is silent and expensive: a message that
+// should have become a bill gets read as "name the customer" instead, and
+// the order is simply lost. Every routing decision that existed before
+// customer naming was added must still land where it did.
+
+for (const order of [
+  "Ravi 2 paneer 1 lassi",
+  "2 paneer 3 naan",
+  "ravi ka bill bana 2 paneer",
+  "this is 2 paneer",
+  "name 2 chai",
+  "its 3 samosa",
+  "customer 2 lassi",
+  "2 paneer tikka\n3 naan\nRahul",
+  "rahul - 2 paneer, 3 naan",
+  "meera 5 dabba 180 each",
+]) {
+  test(`still an order: ${JSON.stringify(order)}`, () => {
+    assert.equal(name(order), "order");
+  });
+}
+
+for (const [text, want] of [
+  ["paneer ka rate kya hai", "prices"],
+  ["open bills", "open_bills"],
+  ["add 2 samosa", "add_item"],
+  ["remove naan", "remove_item"],
+  ["Ravi paid 500", "payment"],
+  ["#1042 paid", "payment"],
+  ["show bill", "show_bill"],
+  ["actually paneer was 3", "correction"],
+  ["rename panner to paneer", "rename"],
+  ["hi", "greeting"],
+] as const) {
+  test(`still ${want}: ${JSON.stringify(text)}`, () => {
+    assert.equal(name(text), want);
+  });
+}
+
+for (const [text, who] of [
+  ["this is Ravi", "Ravi"],
+  ["customer Meera", "Meera"],
+  ["its Ravi Jerath", "Ravi Jerath"],
+  ["that's Meera", "Meera"],
+  ["naam Meera", "Meera"],
+  ["Ravi Jerath ka bill hai", "Ravi Jerath"],
+] as const) {
+  test(`names a bill: ${JSON.stringify(text)}`, () => {
+    const intent = classifyIntent(text);
+    assert.equal(intent.name, "set_customer");
+    assert.equal(intent.customer, who);
+  });
+}
