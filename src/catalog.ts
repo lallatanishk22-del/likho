@@ -1,4 +1,4 @@
-import { editDistance, distanceBudget, squeezeRepeats, normalizeName } from "./nearName.js";
+import { editDistance, distanceBudget, squeezeRepeats, squeezeSpaces, normalizeName } from "./nearName.js";
 
 // Seller price store + deterministic price resolution.
 //
@@ -125,6 +125,9 @@ export function findProduct(
     if (hit) return { product: hit, kind: "exact" };
   }
 
+  const typed = keys[0] ?? "";
+  const typed0 = typed;
+
   // Tier 2: repeat-squeezed.
   for (const key of keys) {
     const squeezed = squeezeRepeats(key);
@@ -133,9 +136,17 @@ export function findProduct(
     if (hit) return { product: hit, kind: "near" };
   }
 
+  // Tier 2b: spacing. "rot i" -> "roti", "paneerroll" -> "paneer roll".
+  // A stray or missing space is a normal phone typo, and edit distance
+  // handles it badly: the space is one edit AND shifts everything after it.
+  const despaced = squeezeSpaces(typed0);
+  const spacingHits = index.allKeys.filter(({ key }) => squeezeSpaces(key) === despaced);
+  const spacingProducts = new Set(spacingHits.map((h) => h.product.id));
+  if (spacingProducts.size > 1) return "ambiguous";
+  if (spacingHits.length > 0) return { product: spacingHits[0]!.product, kind: "near" };
+
   // Tier 3: edit distance. A winner must be strictly closer than every
   // other product — a tie is a genuine ambiguity, not a coin toss.
-  const typed = keys[0] ?? "";
   const budget = distanceBudget(typed.length);
   if (budget === 0) return null;
 

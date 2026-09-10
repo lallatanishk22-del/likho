@@ -151,3 +151,40 @@ test("a stated price bills an item that is not in the list at all", () => {
 test("an empty catalog matches nothing", () => {
   assert.equal(lookup("lassi", catalog()), null);
 });
+
+// --- Spacing typos ------------------------------------------------------
+// "rot i" is a normal phone typo. Edit distance handles it badly: the
+// space counts as one edit AND shifts every following character.
+
+test("'rot i' finds roti", () => {
+  assert.deepEqual(lookup("rot i", catalog(["roti", 15])), { name: "roti", kind: "near" });
+});
+
+test("a missing space between words is found", () => {
+  assert.deepEqual(lookup("paneerroll", catalog(["paneer roll", 120])), {
+    name: "paneer roll",
+    kind: "near",
+  });
+});
+
+test("a stray space in a long name is found", () => {
+  assert.deepEqual(lookup("masala do sa", catalog(["masala dosa", 120])), {
+    name: "masala dosa",
+    kind: "near",
+  });
+});
+
+test("spacing does not override an exact match", () => {
+  assert.deepEqual(lookup("roti", catalog(["roti", 15], ["rot i", 20])), {
+    name: "roti",
+    kind: "exact",
+  });
+});
+
+test("two products that differ only by spacing refuse rather than guess", () => {
+  assert.equal(lookup("hotdog", catalog(["hot dog", 80], ["hotd og", 90])), "ambiguous");
+});
+
+test("spacing does not match a genuinely different product", () => {
+  assert.equal(lookup("bir yani", catalog(["roti", 15], ["chai", 10])), null);
+});

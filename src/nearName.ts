@@ -60,6 +60,14 @@ export function squeezeRepeats(name: string): string {
   return name.replace(/(.)\1+/g, "$1");
 }
 
+// Removes all spacing: "rot i" -> "roti", "paneerroll" -> "paneerroll".
+// A stray space inside a word is a normal phone typo and edit distance
+// alone will not always close it, since the space counts as an edit AND
+// shifts every following character.
+export function squeezeSpaces(name: string): string {
+  return name.replace(/\s+/g, "");
+}
+
 export function normalizeName(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ").trim();
 }
@@ -82,6 +90,13 @@ export function suggestFromList(name: string, candidates: string[]): string | nu
   const squeezed = squeezeRepeats(typed);
   for (let i = 0; i < normalized.length; i++) {
     if (squeezeRepeats(normalized[i]!) === squeezed) return candidates[i]!;
+  }
+
+  // A space typed inside a word, or a missing one between words.
+  const despaced = squeezeSpaces(typed);
+  const despacedHits = normalized.filter((n) => squeezeSpaces(n) === despaced);
+  if (despacedHits.length === 1) {
+    return candidates[normalized.indexOf(despacedHits[0]!)]!;
   }
 
   const budget = distanceBudget(typed.length);
