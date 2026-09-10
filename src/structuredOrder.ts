@@ -142,18 +142,29 @@ export function validateStructuredShape(
     if (typeof item["unitPrice"] !== "number" || item["unitPrice"] <= 0) {
       throw new Error(`No price found for "${name}". Please state the price, e.g. "${name} ₹100 each".`);
     }
-    if (typeof item["evidence"] !== "string" || item["evidence"].trim().length === 0) {
+    // Evidence proves the model did not INVENT a price. When the price
+    // came from the seller's own catalog (a deterministic lookup the model
+    // had no say in), there is no model-supplied price to corroborate —
+    // the quantity is still grounded independently below. Requiring
+    // evidence there rejected plainly correct orders like "1 chai 2 paneer
+    // roll" purely because the model omitted the field.
+    const claimedSource = item["priceSource"];
+    const evidenceRequired = claimedSource !== "catalog";
+    if (
+      evidenceRequired &&
+      (typeof item["evidence"] !== "string" || item["evidence"].trim().length === 0)
+    ) {
       throw new Error(`No supporting text found for "${name}". Please confirm the quantity and price.`);
     }
 
     const quantity = item["quantity"] as number;
     const unitPrice = item["unitPrice"] as number;
-    const evidence = item["evidence"] as string;
+    const evidence = typeof item["evidence"] === "string" ? item["evidence"] : "";
     // Set by catalog.ts's resolvePrices() for prices supplied by the price
     // store. Absent (undefined) for anything coming straight from a model.
     const priceSource = item["priceSource"] === "catalog" ? "catalog" : "stated";
 
-    if (!evidenceIsGrounded(evidence, originalMessage)) {
+    if (evidence.length > 0 && !evidenceIsGrounded(evidence, originalMessage)) {
       throw new Error(
         `Couldn't verify "${name}"'s price/quantity against your message. Please resend clearly.`,
       );

@@ -194,6 +194,7 @@ export function computeTrustSignals(order: ValidatedOrder, originalMessage: stri
   let duplicateEvidenceAcrossItems = false;
   for (const item of order.items) {
     const key = normalize(item.evidence);
+    if (key.length === 0) continue; // absent evidence is not duplicate evidence
     if (evidenceSeen.has(key)) {
       duplicateEvidenceAcrossItems = true;
       break;

@@ -90,18 +90,49 @@ Your current bill is remembered:
   /done    mark it sent, count it in today's sales
   /sales   today's total`;
 
+// Accepts one item per line, so a seller can paste their whole price list
+// at once:
+//
+//   /add samosa 20
+//   chai 15
+//   paneer roll 120
+//
+// Previously the newlines collapsed into spaces and the whole thing became
+// ONE product named "samosa 20 chai 15 paneer roll" at ₹120.
 async function handleAdd(businessId: string, args: string): Promise<string> {
-  // "/add paneer tikka 120" -> name = everything but the last token.
-  const tokens = args.trim().split(/\s+/);
-  const price = Number(tokens[tokens.length - 1]);
-  const name = tokens.slice(0, -1).join(" ");
+  const lines = args
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
 
-  if (tokens.length < 2 || !Number.isFinite(price) || price < 0 || name.length === 0) {
-    return 'Use: /add <item> <price>\nExample: /add paneer 120';
+  if (lines.length === 0) {
+    return "Use: /add <item> <price>\nExample: /add paneer 120\n\nOr several at once, one per line:\n  /add samosa 20\n  chai 15\n  paneer roll 120";
   }
 
-  await upsertProduct(businessId, name, price);
-  return `Saved: ${name} — ₹${price}`;
+  const saved: string[] = [];
+  const failed: string[] = [];
+
+  for (const line of lines) {
+    const tokens = line.split(/\s+/);
+    const price = Number(tokens[tokens.length - 1]);
+    const name = tokens.slice(0, -1).join(" ");
+
+    if (tokens.length < 2 || !Number.isFinite(price) || price < 0 || name.length === 0) {
+      failed.push(line);
+      continue;
+    }
+    await upsertProduct(businessId, name, price);
+    saved.push(`${name} — ₹${price}`);
+  }
+
+  const parts: string[] = [];
+  if (saved.length > 0) parts.push(`Saved:\n${saved.map((s) => `  ${s}`).join("\n")}`);
+  if (failed.length > 0) {
+    parts.push(
+      `Couldn't read (needs "<item> <price>"):\n${failed.map((f) => `  ${f}`).join("\n")}`,
+    );
+  }
+  return parts.join("\n\n");
 }
 
 async function handlePrices(businessId: string): Promise<string> {
@@ -249,6 +280,64 @@ async function handleSales(businessId: string): Promise<string> {
   return `Today's sales\n\n${sales.count} bill(s)\n₹${sales.total} billed`;
 }
 
+// Every command Likho understands. Used to split one message into the
+// sequence of commands it actually contains.
+const KNOWN_COMMANDS = [
+  "/start", "/help", "/add", "/prices", "/list", "/remove",
+  "/zbill", "/plus", "/additem", "/minus", "/removeitem",
+  "/bill", "/done", "/sales",
+];
+
+export interface ParsedCommand {
+  command: string;
+  args: string;
+}
+
+// THE RULE: one message = a sequence of commands, run top to bottom.
+//
+// A command starts at the beginning of a line, or mid-line after
+// whitespace. Everything up to the next command is its arguments. This is
+// what makes all of these behave the way a seller expects:
+//
+//   /add samosa 20\nchai 15         -> one /add, two lines of arguments
+//   /zbill 2 chai\n/plus 1 mithai   -> two commands
+//   /zbill 2 chai /plus 1 mithai    -> two commands (same line)
+//
+// Splitting deterministically here means the model never has to guess
+// whether "/add mithai 10" was an instruction or part of an order — a
+// question it got wrong repeatedly.
+export function splitCommands(text: string): ParsedCommand[] {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return [];
+
+  // Locate every known command occurrence at a valid boundary.
+  const hits: { index: number; command: string }[] = [];
+  for (const cmd of KNOWN_COMMANDS) {
+    const pattern = new RegExp(`(^|\\s)(${cmd})(?=\\s|$)`, "gi");
+    for (const m of trimmed.matchAll(pattern)) {
+      hits.push({ index: m.index! + m[1]!.length, command: cmd });
+    }
+  }
+
+  if (hits.length === 0) return [{ command: "", args: trimmed }];
+
+  hits.sort((a, b) => a.index - b.index);
+
+  // Anything before the first command is not a command — ignore it rather
+  // than silently folding it into one.
+  const parsed: ParsedCommand[] = [];
+  for (let i = 0; i < hits.length; i++) {
+    const hit = hits[i]!;
+    const argsStart = hit.index + hit.command.length;
+    const argsEnd = i + 1 < hits.length ? hits[i + 1]!.index : trimmed.length;
+    parsed.push({
+      command: hit.command.toLowerCase(),
+      args: trimmed.slice(argsStart, argsEnd).trim(),
+    });
+  }
+  return parsed;
+}
+
 export async function handleIncoming(incoming: IncomingMessage): Promise<string> {
   const { platform, platformUserId, displayName, text, onSlowWork } = incoming;
   const sourceMessageId = incoming.messageId ?? null;
@@ -261,10 +350,31 @@ export async function handleIncoming(incoming: IncomingMessage): Promise<string>
   }
 
   const trimmed = text.trim();
-  const [rawCommand, ...rest] = trimmed.split(/\s+/);
-  const command = (rawCommand ?? "").toLowerCase();
-  const args = rest.join(" ");
+  const commands = splitCommands(trimmed);
 
+  // More than one command in a message: run them in order and return every
+  // reply, so "/zbill 2 chai /plus 1 mithai" does both things.
+  if (commands.length > 1) {
+    const replies: string[] = [];
+    for (const c of commands) {
+      replies.push(await runCommand(businessId, incoming, c.command, c.args, trimmed, sourceMessageId));
+    }
+    return replies.join("\n\n———\n\n");
+  }
+
+  const only = commands[0] ?? { command: "", args: trimmed };
+  return runCommand(businessId, incoming, only.command, only.args, trimmed, sourceMessageId);
+}
+
+async function runCommand(
+  businessId: string,
+  incoming: IncomingMessage,
+  command: string,
+  args: string,
+  trimmed: string,
+  sourceMessageId: string | null,
+): Promise<string> {
+  const { onSlowWork } = incoming;
   try {
     switch (command) {
       case "/start":

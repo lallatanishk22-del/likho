@@ -167,3 +167,92 @@ test("unresolved items produce a seller-facing message, not a crash", () => {
   };
   assert.throws(() => applyCatalog(raw, catalog), /don't have a price for "puri bhaji"/);
 });
+
+// ── Evidence requirement is scoped to model-supplied prices ──────────
+// Evidence exists to prove the model did not invent a PRICE. A catalog
+// price came from a deterministic DB lookup the model had no say in, so
+// there is nothing for evidence to corroborate — the quantity is still
+// grounded independently. These lock that boundary in place.
+
+test("catalog-priced item is accepted WITHOUT evidence", () => {
+  const message = "1 chai 2 paneer roll";
+  const cat: PriceCatalog = {
+    businessId: "b",
+    products: [
+      { id: "c", name: "chai", price: 15, aliases: [] },
+      { id: "p", name: "paneer roll", price: 120, aliases: [] },
+    ],
+  };
+  const raw = {
+    status: "valid",
+    customer: null,
+    // evidence null — exactly what the local model returns on terse input.
+    items: [
+      { name: "chai", quantity: 1, unitPrice: null, evidence: null },
+      { name: "paneer roll", quantity: 2, unitPrice: null, evidence: null },
+    ],
+    discountPercent: null,
+    clarification: null,
+  };
+  const validated = validateStructuredShape(applyCatalog(raw, cat), message);
+  assert.equal(validated.items.length, 2);
+  assert.equal(validated.items[0]!.unitPrice, 15);
+  assert.equal(validated.items[1]!.unitPrice, 120);
+});
+
+test("SAFETY: a model-supplied price with NO evidence is still rejected", () => {
+  const message = "2 chai";
+  const raw = {
+    status: "valid",
+    customer: null,
+    // Claims a price but offers nothing to back it up, and no catalog
+    // provenance — must not be trusted.
+    items: [{ name: "chai", quantity: 2, unitPrice: 15, evidence: null }],
+    discountPercent: null,
+    clarification: null,
+  };
+  assert.throws(() => validateStructuredShape(raw, message), /No supporting text found for "chai"/);
+});
+
+test("SAFETY: an invented price is rejected even with catalog items present", () => {
+  const message = "1 chai 2 paneer roll";
+  const cat: PriceCatalog = {
+    businessId: "b",
+    products: [{ id: "c", name: "chai", price: 15, aliases: [] }],
+  };
+  const raw = {
+    status: "valid",
+    customer: null,
+    items: [
+      { name: "chai", quantity: 1, unitPrice: null, evidence: null },
+      // 777 appears nowhere in the message and is not in the catalog.
+      { name: "paneer roll", quantity: 2, unitPrice: 777, evidence: "2 paneer roll" },
+    ],
+    discountPercent: null,
+    clarification: null,
+  };
+  assert.throws(
+    () => validateStructuredShape(applyCatalog(raw, cat), message),
+    /Price for "paneer roll"/,
+  );
+});
+
+test("SAFETY: quantity grounding still applies to catalog-priced items", () => {
+  const message = "chai please";
+  const cat: PriceCatalog = {
+    businessId: "b",
+    products: [{ id: "c", name: "chai", price: 15, aliases: [] }],
+  };
+  const raw = {
+    status: "valid",
+    customer: null,
+    // Quantity 9 appears nowhere — must be rejected despite a clean price.
+    items: [{ name: "chai", quantity: 9, unitPrice: null, evidence: null }],
+    discountPercent: null,
+    clarification: null,
+  };
+  assert.throws(
+    () => validateStructuredShape(applyCatalog(raw, cat), message),
+    /Quantity for "chai"/,
+  );
+});
