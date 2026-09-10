@@ -16,6 +16,7 @@ import {
 } from "./billStore.js";
 import { buildCatalogIndex } from "./catalog.js";
 import { classifyIntent } from "./intent.js";
+import { parsePriceList } from "./priceList.js";
 
 // Platform-independent command routing. Telegram polling (telegramBot.ts)
 // and the HTTP API used by n8n (apiServer.ts) both call handleIncoming(),
@@ -153,46 +154,36 @@ Then talk to me normally:
 
 Buttons on each bill do the same thing.`;
 
-// Accepts one item per line, so a seller can paste their whole price list
-// at once:
-//
-//   /add samosa 20
-//   chai 15
-//   paneer roll 120
-//
-// Previously the newlines collapsed into spaces and the whole thing became
-// ONE product named "samosa 20 chai 15 paneer roll" at ₹120.
+// Saves prices in whatever shape the seller typed them — see priceList.ts.
+// Partial success is deliberate: an unreadable fragment must never discard
+// the items that WERE understood.
 async function handleAdd(businessId: string, args: string): Promise<string> {
-  const lines = args
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0);
+  const { entries, unreadable } = parsePriceList(args);
 
-  if (lines.length === 0) {
-    return "Use: /add <item> <price>\nExample: /add paneer 120\n\nOr several at once, one per line:\n  /add samosa 20\n  chai 15\n  paneer roll 120";
+  if (entries.length === 0 && unreadable.length === 0) {
+    return (
+      "Tell me your rates. Any of these work:\n" +
+      "  /add paneer 220\n" +
+      "  /add 220 paneer\n" +
+      "  /add paneer 220, lassi 80\n\n" +
+      "Or one per line."
+    );
   }
 
   const saved: string[] = [];
-  const failed: string[] = [];
-
-  for (const line of lines) {
-    const tokens = line.split(/\s+/);
-    const price = Number(tokens[tokens.length - 1]);
-    const name = tokens.slice(0, -1).join(" ");
-
-    if (tokens.length < 2 || !Number.isFinite(price) || price < 0 || name.length === 0) {
-      failed.push(line);
-      continue;
-    }
-    await upsertProduct(businessId, name, price);
-    saved.push(`${name} — ₹${price}`);
+  for (const entry of entries) {
+    await upsertProduct(businessId, entry.name, entry.price);
+    saved.push(`${entry.name} \u2014 ${formatRupees(entry.price)}`);
   }
 
   const parts: string[] = [];
-  if (saved.length > 0) parts.push(`Saved:\n${saved.map((s) => `  ${s}`).join("\n")}`);
-  if (failed.length > 0) {
+  if (saved.length > 0) {
+    parts.push(`Saved ${saved.length} item(s):\n${saved.map((s) => `  ${s}`).join("\n")}`);
+  }
+  if (unreadable.length > 0) {
     parts.push(
-      `Couldn't read (needs "<item> <price>"):\n${failed.map((f) => `  ${f}`).join("\n")}`,
+      `I couldn't find a price for:\n${unreadable.map((f) => `  ${f}`).join("\n")}\n\n` +
+        `Send it as "${unreadable[0]} 100" and I'll save it.`,
     );
   }
   return parts.join("\n\n");
