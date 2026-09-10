@@ -18,6 +18,7 @@ export type IntentName =
   | "show_bill"
   | "confirm"
   | "sales"
+  | "open_bills"
   | "prices"
   | "payment"
   | "pdf"
@@ -112,6 +113,15 @@ export function classifyIntent(rawText: string): Intent {
   const removeMatch = text.match(/^(?:remove|delete|minus|cancel|hata\s*do|nikal\s*do|-)\s+(.+)$/i);
   if (removeMatch) {
     return { ...base, name: "remove_item", text: removeMatch[1]!.trim() };
+  }
+
+  // Asked before "sales" and before "show_bill": "open bills" contains
+  // both "bills" and a show-like sense, and must reach its own handler.
+  if (
+    /\b(open|pending|unconfirmed|unclosed|draft)\s+(bill|bills|orders?)\b/i.test(lower) ||
+    /\bbills?\s+(open|pending|unconfirmed)\b/i.test(lower)
+  ) {
+    return { ...base, name: "open_bills" };
   }
 
   if (hasWord(lower, "sales", "total today", "today's", "kitna", "kamaya")) {

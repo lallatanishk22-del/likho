@@ -12,6 +12,7 @@ import {
   getBillByNo,
   recordPayment,
   setItemQuantity,
+  getOpenBills,
   type StoredBill,
 } from "./billStore.js";
 import { buildCatalogIndex, findProduct } from "./catalog.js";
@@ -348,7 +349,10 @@ async function handleConfirm(businessId: string, billNo: number | null): Promise
   return {
     text:
       `${renderStoredBill(confirmed)}\n\n` +
-      `Confirmed. Today: ${sales.count} bill(s), ${formatRupees(Number(sales.total))}`,
+      `Confirmed. Today: ${sales.count} bill(s), ${formatRupees(sales.total)}` +
+      (sales.openCount > 0
+        ? `\n${sales.openCount} still unconfirmed \u2014 say "open bills".`
+        : ""),
     actions: billActions(confirmed),
   };
 }
@@ -381,10 +385,56 @@ async function handleDone(businessId: string): Promise<Reply> {
   return handleConfirm(businessId, null);
 }
 
-async function handleSales(businessId: string): Promise<string> {
-  const sales = await getTodaysSales(businessId);
-  if (sales.count === 0) return "No bills confirmed today yet.";
-  return `Today's sales\n\n${sales.count} bill(s)\n${formatRupees(Number(sales.total))} billed`;
+// Reports confirmed sales AND unconfirmed drafts. Showing only confirmed
+// bills was technically true and practically misleading: a seller who had
+// made a dozen bills saw a total covering two of them, with no indication
+// the rest existed or how to find them.
+async function handleSales(businessId: string): Promise<Reply> {
+  const s = await getTodaysSales(businessId);
+
+  if (s.count === 0 && s.openCount === 0) {
+    return { text: "Nothing billed today yet." };
+  }
+
+  const lines = ["Today"];
+
+  if (s.count > 0) {
+    lines.push("", `${s.count} confirmed \u2014 ${formatRupees(s.total)}`);
+    if (s.unpaidTotal > 0) {
+      lines.push(`  ${formatRupees(s.paidTotal)} collected`);
+      lines.push(`  ${formatRupees(s.unpaidTotal)} still owed`);
+    } else {
+      lines.push("  all paid");
+    }
+  } else {
+    lines.push("", "Nothing confirmed yet.");
+  }
+
+  if (s.openCount > 0) {
+    lines.push(
+      "",
+      `${s.openCount} unconfirmed \u2014 ${formatRupees(s.openTotal)}`,
+      "These aren't counted yet. Say \"open bills\" to see them.",
+    );
+  }
+
+  return { text: lines.join("\n") };
+}
+
+async function handleOpenBills(businessId: string): Promise<Reply> {
+  const open = await getOpenBills(businessId);
+  if (open.length === 0) {
+    return { text: "No unconfirmed bills today \u2014 everything is closed off." };
+  }
+  const lines = open.map(
+    (b) =>
+      `#${b.bill_no}  ${b.customer_ref ? titleCase(b.customer_ref) : "no name"}  ${formatRupees(Number(b.total))}`,
+  );
+  return {
+    text:
+      `${open.length} unconfirmed bill(s):\n\n${lines.join("\n")}\n\n` +
+      `Open one with "show #${open[0]!.bill_no}", then Confirm.`,
+  };
 }
 
 // A correction ("actually paneer was 3") changes the bill that is already
@@ -443,7 +493,7 @@ const GREETING_REPLY =
 const KNOWN_COMMANDS = [
   "/start", "/help", "/add", "/prices", "/list", "/remove",
   "/zbill", "/plus", "/additem", "/minus", "/removeitem",
-  "/bill", "/done", "/sales", "/paid",
+  "/bill", "/done", "/sales", "/paid", "/open",
 ];
 
 export interface ParsedCommand {
@@ -552,7 +602,9 @@ async function runIntent(
       case "prices":
         return { text: await handlePrices(businessId) };
       case "sales":
-        return { text: await handleSales(businessId) };
+        return await handleSales(businessId);
+      case "open_bills":
+        return await handleOpenBills(businessId);
       case "show_bill": {
         const bill = await resolveBill(businessId, intent.billNo);
         if (!bill) {
@@ -666,7 +718,9 @@ async function runCommand(
       case "/paid":
         return await handlePayment(businessId, null, null);
       case "/sales":
-        return { text: await handleSales(businessId) };
+        return await handleSales(businessId);
+      case "/open":
+        return await handleOpenBills(businessId);
       default:
         // An unrecognised slash command is a typo, not an order — never
         // silently bill it.

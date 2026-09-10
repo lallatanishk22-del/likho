@@ -1,6 +1,7 @@
 import type { Bill } from "./types.js";
 import type { ParsedOrder } from "./structuredOrder.js";
 import { rest } from "./catalogStore.js";
+import { startOfBusinessDay } from "./businessDay.js";
 
 // Persistence for BillSession — the durable, versioned state that turns a
 // one-shot reply into something the seller can come back to, edit, and
@@ -128,10 +129,15 @@ export async function createBillSession(
 
 // The seller's current working bill for this business: most recently
 // updated one that isn't finalized yet.
+// The seller's current working bill. Scoped to TODAY on purpose: an
+// unconfirmed bill from a previous day is abandoned, not current, and
+// silently attaching "add 2 chai" to yesterday's order would corrupt a
+// record the seller had already moved on from.
 export async function getCurrentDraft(businessId: string): Promise<StoredBill | null> {
+  const since = startOfBusinessDay().toISOString();
   const sessions = (await rest(
     `bill_sessions?business_id=eq.${businessId}&status=in.(draft,updated)` +
-      `&order=updated_at.desc&limit=1&select=*`,
+      `&created_at=gte.${since}&order=updated_at.desc&limit=1&select=*`,
   )) as BillSessionRow[];
 
   if (sessions.length === 0) return null;
@@ -153,21 +159,53 @@ export async function finalizeBill(sessionId: string): Promise<void> {
 
 // Today's finalized bills — the end-of-day view. Deliberately counts only
 // finalized bills: a draft is not a sale.
-export async function getTodaysSales(
-  businessId: string,
-): Promise<{ count: number; total: number }> {
-  const startOfDay = new Date();
-  startOfDay.setHours(0, 0, 0, 0);
+export interface DaySummary {
+  count: number;
+  total: number;
+  paidTotal: number;
+  unpaidTotal: number;
+  // Bills started today that were never confirmed. Previously invisible:
+  // a seller could work all day, leave most bills unconfirmed, and see a
+  // daily total far below what they had actually done — with no way to
+  // find the missing ones.
+  openCount: number;
+  openTotal: number;
+}
 
-  const rows = (await rest(
+export async function getTodaysSales(businessId: string): Promise<DaySummary> {
+  const since = startOfBusinessDay().toISOString();
+
+  const confirmed = (await rest(
     `bill_sessions?business_id=eq.${businessId}&status=eq.finalized` +
-      `&finalized_at=gte.${startOfDay.toISOString()}&select=total`,
+      `&finalized_at=gte.${since}&select=total,amount_paid,payment_status`,
+  )) as { total: string | number; amount_paid: string | number }[];
+
+  const open = (await rest(
+    `bill_sessions?business_id=eq.${businessId}&status=in.(draft,updated)` +
+      `&created_at=gte.${since}&select=total`,
   )) as { total: string | number }[];
 
+  const total = confirmed.reduce((sum, r) => sum + Number(r.total), 0);
+  const paidTotal = confirmed.reduce((sum, r) => sum + Number(r.amount_paid), 0);
+
   return {
-    count: rows.length,
-    total: rows.reduce((sum, r) => sum + Number(r.total), 0),
+    count: confirmed.length,
+    total: Math.round(total * 100) / 100,
+    paidTotal: Math.round(paidTotal * 100) / 100,
+    unpaidTotal: Math.round((total - paidTotal) * 100) / 100,
+    openCount: open.length,
+    openTotal: Math.round(open.reduce((sum, r) => sum + Number(r.total), 0) * 100) / 100,
   };
+}
+
+// Bills started today and never confirmed, newest first — so "show open
+// bills" can list exactly what is unaccounted for.
+export async function getOpenBills(businessId: string): Promise<BillSessionRow[]> {
+  const since = startOfBusinessDay().toISOString();
+  return (await rest(
+    `bill_sessions?business_id=eq.${businessId}&status=in.(draft,updated)` +
+      `&created_at=gte.${since}&order=created_at.desc&select=*`,
+  )) as BillSessionRow[];
 }
 
 // ── Manual edit ──────────────────────────────────────────────────────

@@ -154,3 +154,22 @@ test("a normal order starting with a name is still an order", () => {
   // Guard against the add/remove patterns being too greedy.
   assert.equal(classifyIntent("Adarsh 2 paneer").name, "order");
 });
+
+// --- Open (unconfirmed) bills ------------------------------------------
+// These must not fall through to "sales" or "show_bill".
+
+test("'open bills' lists unconfirmed bills", () => {
+  assert.equal(name("open bills"), "open_bills");
+});
+
+test("'pending bills' lists unconfirmed bills", () => {
+  assert.equal(name("pending bills"), "open_bills");
+});
+
+test("'show open bills' still lists them, not one bill", () => {
+  assert.equal(name("show open bills"), "open_bills");
+});
+
+test("'sales' is still sales", () => {
+  assert.equal(name("sales"), "sales");
+});
