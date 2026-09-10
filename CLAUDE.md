@@ -1,5 +1,11 @@
 # CLAUDE.md
 
+> **Read [PRODUCT_DIRECTION.md](PRODUCT_DIRECTION.md) first.** It is the
+> current product direction and takes precedence wherever it conflicts with
+> this file — most importantly: ZBill is chat-first, natural language is the
+> primary interface, and slash commands are optional shortcuts, not the
+> product.
+
 This file provides guidance to Claude Code when working on the Likho codebase.
 
 # Likho — Product Vision

@@ -13,6 +13,9 @@ export type ChangeReason = "created" | "manual_edit" | "conversation_update";
 export interface BillSessionRow {
   id: string;
   business_id: string;
+  // Per-business sequential transaction identity (#1042). Allocated
+  // atomically in Postgres, never derived from the UUID.
+  bill_no: number;
   customer_ref: string | null;
   status: BillStatus;
   version: number;
@@ -21,6 +24,10 @@ export interface BillSessionRow {
   discount_amount: string | number;
   total: string | number;
   last_checked_message_id: string | null;
+  // Payment is only ever set by the seller's explicit confirmation, never
+  // inferred from a customer's message.
+  payment_status: "pending" | "partial" | "paid";
+  amount_paid: string | number;
   updated_at: string;
 }
 
@@ -61,16 +68,30 @@ async function writeVersion(
 // Creates a NEW bill session. Only called when the seller hands Likho a
 // fresh order — never when an existing bill changes (that versions in
 // place, so one order stays one transaction).
+// Asks Postgres for the next number for this business. Kept server-side
+// and atomic on purpose: two orders arriving at once must never be handed
+// the same bill number.
+async function allocateBillNo(businessId: string): Promise<number> {
+  const result = (await rest("rpc/allocate_bill_no", {
+    method: "POST",
+    body: JSON.stringify({ p_business_id: businessId }),
+  })) as number;
+  return result;
+}
+
 export async function createBillSession(
   businessId: string,
   parsed: ParsedOrder,
   bill: Bill,
   sourceMessageId: string | null,
 ): Promise<StoredBill> {
+  const billNo = await allocateBillNo(businessId);
+
   const created = (await rest("bill_sessions", {
     method: "POST",
     body: JSON.stringify({
       business_id: businessId,
+      bill_no: billNo,
       customer_ref: parsed.customer,
       source_message_id: sourceMessageId,
       last_checked_message_id: sourceMessageId,
@@ -261,5 +282,75 @@ export async function removeItemFromBill(
   if (!match) return null;
 
   await rest(`bill_items?id=eq.${match.id}`, { method: "DELETE" });
+  return recalculateBill(sessionId, "manual_edit");
+}
+
+// Looks a bill up by the number the seller actually said ("#1042"), scoped
+// to their business so one seller can never address another's transaction.
+export async function getBillByNo(
+  businessId: string,
+  billNo: number,
+): Promise<StoredBill | null> {
+  const sessions = (await rest(
+    `bill_sessions?business_id=eq.${businessId}&bill_no=eq.${billNo}&limit=1&select=*`,
+  )) as BillSessionRow[];
+  if (sessions.length === 0) return null;
+  const session = sessions[0]!;
+
+  const items = (await rest(
+    `bill_items?bill_session_id=eq.${session.id}&order=position.asc&select=*`,
+  )) as BillItemRow[];
+  return { session, items };
+}
+
+// Records a payment against a bill. The status is DERIVED from the amounts
+// (deterministic, like every other money decision here) rather than taken
+// from whatever the seller's sentence implied.
+export async function recordPayment(
+  sessionId: string,
+  amount: number | null,
+): Promise<StoredBill | null> {
+  const sessions = (await rest(
+    `bill_sessions?id=eq.${sessionId}&limit=1&select=*`,
+  )) as BillSessionRow[];
+  if (sessions.length === 0) return null;
+  const session = sessions[0]!;
+
+  const total = Number(session.total);
+  // A payment with no stated amount means "paid in full".
+  const paidNow = amount === null ? total : Number(session.amount_paid) + amount;
+  const clamped = Math.min(Math.round(paidNow * 100) / 100, total);
+  const status: BillSessionRow["payment_status"] =
+    clamped >= total ? "paid" : clamped > 0 ? "partial" : "pending";
+
+  const updated = (await rest(`bill_sessions?id=eq.${sessionId}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      amount_paid: clamped,
+      payment_status: status,
+      updated_at: new Date().toISOString(),
+    }),
+  })) as BillSessionRow[];
+
+  const items = (await rest(
+    `bill_items?bill_session_id=eq.${sessionId}&order=position.asc&select=*`,
+  )) as BillItemRow[];
+  return { session: updated[0]!, items };
+}
+
+// Sets an item's quantity IN PLACE. Used by conversational corrections
+// ("actually paneer was 3"). Editing in place rather than removing and
+// re-adding matters: a correction must not silently reorder the seller's
+// bill, which is confusing when they are reading it back to a customer.
+// The whole bill is still recalculated deterministically afterwards.
+export async function setItemQuantity(
+  sessionId: string,
+  itemId: string,
+  quantity: number,
+): Promise<StoredBill> {
+  await rest(`bill_items?id=eq.${itemId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ quantity }),
+  });
   return recalculateBill(sessionId, "manual_edit");
 }

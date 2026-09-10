@@ -1,0 +1,300 @@
+{
+  "builtTestProducts" : [
+
+  ],
+  "copyCommands" : {
+
+  },
+  "explicitTargetDependencyImportCheckingMode" : {
+    "none" : {
+
+    }
+  },
+  "generatedSourceTargetSet" : [
+
+  ],
+  "pluginDescriptions" : [
+
+  ],
+  "swiftCommands" : {
+    "C.LikhoMac-arm64-apple-macosx15.0-debug.module" : {
+      "executable" : "/Library/Developer/CommandLineTools/usr/bin/swiftc",
+      "fileList" : "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/sources",
+      "importPath" : "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/tanishk/likho/mac/Sources/LikhoMac/AppDelegate.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanishk/likho/mac/Sources/LikhoMac/ClipboardCapture.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanishk/likho/mac/Sources/LikhoMac/LikhoBridge.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanishk/likho/mac/Sources/LikhoMac/ResultPopup.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanishk/likho/mac/Sources/LikhoMac/main.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/sources"
+        }
+      ],
+      "isLibrary" : false,
+      "moduleName" : "LikhoMac",
+      "moduleOutputPath" : "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/Modules/LikhoMac.swiftmodule",
+      "objects" : [
+        "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/AppDelegate.swift.o",
+        "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/ClipboardCapture.swift.o",
+        "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/LikhoBridge.swift.o",
+        "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/ResultPopup.swift.o",
+        "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/main.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx13.0",
+        "-enable-batch-mode",
+        "-index-store-path",
+        "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-j10",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-module-cache-path",
+        "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-Xfrontend",
+        "-entry-point-function-name",
+        "-Xfrontend",
+        "LikhoMac_main",
+        "-swift-version",
+        "5",
+        "-F",
+        "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+        "-sdk",
+        "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "mac"
+      ],
+      "outputFileMapPath" : "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/AppDelegate.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/ClipboardCapture.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/LikhoBridge.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/ResultPopup.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/main.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/Modules/LikhoMac.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/Users/tanishk/likho/mac/Sources/LikhoMac/AppDelegate.swift",
+        "/Users/tanishk/likho/mac/Sources/LikhoMac/ClipboardCapture.swift",
+        "/Users/tanishk/likho/mac/Sources/LikhoMac/LikhoBridge.swift",
+        "/Users/tanishk/likho/mac/Sources/LikhoMac/ResultPopup.swift",
+        "/Users/tanishk/likho/mac/Sources/LikhoMac/main.swift"
+      ],
+      "tempsPath" : "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build",
+      "wholeModuleOptimization" : false
+    }
+  },
+  "swiftFrontendCommands" : {
+
+  },
+  "swiftTargetScanArgs" : {
+    "LikhoMac" : [
+      "/Library/Developer/CommandLineTools/usr/bin/swiftc",
+      "-module-name",
+      "LikhoMac",
+      "-package-name",
+      "mac",
+      "-incremental",
+      "-c",
+      "/Users/tanishk/likho/mac/Sources/LikhoMac/AppDelegate.swift",
+      "/Users/tanishk/likho/mac/Sources/LikhoMac/ClipboardCapture.swift",
+      "/Users/tanishk/likho/mac/Sources/LikhoMac/LikhoBridge.swift",
+      "/Users/tanishk/likho/mac/Sources/LikhoMac/ResultPopup.swift",
+      "/Users/tanishk/likho/mac/Sources/LikhoMac/main.swift",
+      "-I",
+      "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx13.0",
+      "-enable-batch-mode",
+      "-index-store-path",
+      "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-j10",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-module-cache-path",
+      "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-Xfrontend",
+      "-entry-point-function-name",
+      "-Xfrontend",
+      "LikhoMac_main",
+      "-swift-version",
+      "5",
+      "-F",
+      "/Library/Developer/CommandLineTools/Library/Developer/Frameworks",
+      "-sdk",
+      "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "mac",
+      "-driver-use-frontend-path",
+      "/Library/Developer/CommandLineTools/usr/bin/swiftc"
+    ]
+  },
+  "targetDependencyMap" : {
+    "LikhoMac" : [
+
+    ]
+  },
+  "testDiscoveryCommands" : {
+
+  },
+  "testEntryPointCommands" : {
+
+  },
+  "traitConfiguration" : {
+    "enableAllTraits" : false
+  },
+  "writeCommands" : {
+    "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac-entitlement.plist" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<entitlement-plist>"
+        },
+        {
+          "kind" : "virtual",
+          "name" : "<com.apple.security.get-task-allow>"
+        }
+      ],
+      "outputFilePath" : "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac-entitlement.plist"
+    },
+    "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanishk/likho/mac/Sources/LikhoMac/AppDelegate.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanishk/likho/mac/Sources/LikhoMac/ClipboardCapture.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanishk/likho/mac/Sources/LikhoMac/LikhoBridge.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanishk/likho/mac/Sources/LikhoMac/ResultPopup.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanishk/likho/mac/Sources/LikhoMac/main.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/sources"
+    },
+    "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.product/Objects.LinkFileList" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<link-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/AppDelegate.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/ClipboardCapture.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/LikhoBridge.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/ResultPopup.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/main.swift.o"
+        }
+      ],
+      "outputFilePath" : "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.product/Objects.LinkFileList"
+    },
+    "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt" : {
+      "alwaysOutOfDate" : true,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<swift-get-version>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Library/Developer/CommandLineTools/usr/bin/swiftc"
+        }
+      ],
+      "outputFilePath" : "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt"
+    }
+  }
+}

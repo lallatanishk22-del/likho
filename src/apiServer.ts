@@ -123,11 +123,15 @@ async function handleMessageRequest(req: IncomingMessage2, res: ServerResponse):
       messageId: body["messageId"] != null ? String(body["messageId"]) : null,
       repliedText: typeof body["repliedText"] === "string" ? body["repliedText"] : null,
       repliedMessageId: body["repliedMessageId"] != null ? String(body["repliedMessageId"]) : null,
+      forwardedText: typeof body["forwardedText"] === "string" ? body["forwardedText"] : null,
     });
     // Always 200 with the reply text. A clarification ("I don't have a
     // price for X") is a normal product outcome, not an HTTP error — the
     // caller should just send it to the seller.
-    sendJson(res, 200, { ok: true, reply });
+    //
+    // "reply" stays a plain string so existing callers (n8n) keep working;
+    // "actions" is additive for channels that can render them.
+    sendJson(res, 200, { ok: true, reply: reply.text, actions: reply.actions ?? [] });
   } catch (err) {
     sendJson(res, 500, { ok: false, error: `Unexpected server error: ${(err as Error).message}` });
   }

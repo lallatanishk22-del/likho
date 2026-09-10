@@ -1,4 +1,4 @@
-import { handleIncoming } from "./messageHandler.js";
+import { handleIncoming, handleAction, type Reply, type IncomingMessage } from "./messageHandler.js";
 
 // Telegram transport only: receive updates, hand them to the shared
 // message handler, send the reply back. All command routing, billing and
@@ -21,11 +21,25 @@ interface TelegramMessage {
   // Populated when the seller replies to a message. This is how an order
   // written by someone else gets handed to Likho without retyping it.
   reply_to_message?: { message_id?: number; text?: string };
+  // Present on a forwarded message. Telegram moved from forward_from to
+  // forward_origin; both are accepted so older clients still work.
+  forward_origin?: unknown;
+  forward_from?: unknown;
+  forward_sender_name?: string;
+  forward_date?: number;
+}
+
+interface TelegramCallbackQuery {
+  id: string;
+  data?: string;
+  message?: TelegramMessage;
+  from?: { id: number; first_name?: string; username?: string };
 }
 
 interface TelegramUpdate {
   update_id: number;
   message?: TelegramMessage;
+  callback_query?: TelegramCallbackQuery;
 }
 
 interface TelegramGetUpdatesResponse {
@@ -35,15 +49,49 @@ interface TelegramGetUpdatesResponse {
   description?: string;
 }
 
-async function sendMessage(chatId: number, text: string): Promise<void> {
+// Renders the core's channel-independent actions as Telegram inline
+// buttons. The core never knows these are buttons; another channel can
+// present the same actions as a numbered list or quick replies.
+function toInlineKeyboard(reply: Reply): unknown {
+  if (!reply.actions || reply.actions.length === 0) return undefined;
+  return {
+    inline_keyboard: [
+      reply.actions.map((a) => ({ text: a.label, callback_data: a.action })),
+    ],
+  };
+}
+
+async function sendReply(chatId: number, reply: Reply): Promise<void> {
   if (!API_BASE) return;
   const response = await fetch(`${API_BASE}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text }),
+    body: JSON.stringify({
+      chat_id: chatId,
+      text: reply.text,
+      reply_markup: toInlineKeyboard(reply),
+    }),
   });
   if (!response.ok) {
     throw new Error(`sendMessage failed (${response.status}): ${await response.text()}`);
+  }
+}
+
+async function sendMessage(chatId: number, text: string): Promise<void> {
+  await sendReply(chatId, { text });
+}
+
+// Telegram shows a loading spinner on the button until this is called.
+async function answerCallback(callbackId: string): Promise<void> {
+  if (!API_BASE) return;
+  try {
+    await fetch(`${API_BASE}/answerCallbackQuery`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ callback_query_id: callbackId }),
+    });
+  } catch {
+    // Cosmetic only.
   }
 }
 
@@ -62,9 +110,18 @@ async function sendTyping(chatId: number): Promise<void> {
   }
 }
 
-async function handleMessage(message: TelegramMessage, text: string): Promise<string> {
+function isForwarded(message: TelegramMessage): boolean {
+  return (
+    message.forward_origin != null ||
+    message.forward_from != null ||
+    message.forward_sender_name != null ||
+    message.forward_date != null
+  );
+}
+
+function toIncoming(message: TelegramMessage, text: string): IncomingMessage {
   const chatId = message.chat.id;
-  return handleIncoming({
+  return {
     platform: "telegram",
     platformUserId: String(chatId),
     displayName: message.chat.first_name ?? message.chat.username ?? `telegram:${chatId}`,
@@ -75,8 +132,13 @@ async function handleMessage(message: TelegramMessage, text: string): Promise<st
       message.reply_to_message?.message_id != null
         ? String(message.reply_to_message.message_id)
         : null,
+    forwardedText: isForwarded(message) ? text : null,
     onSlowWork: () => sendTyping(chatId),
-  });
+  };
+}
+
+async function handleMessage(message: TelegramMessage, text: string): Promise<Reply> {
+  return handleIncoming(toIncoming(message, text));
 }
 
 async function pollLoop(): Promise<void> {
@@ -122,19 +184,32 @@ async function pollLoop(): Promise<void> {
       // loop or take unrelated messages down with it. Previously an
       // exception here escaped pollLoop entirely and the bot died silently.
       try {
-        if (message && text) {
-          console.log(`[telegram] <- chat=${message.chat.id} ${JSON.stringify(text)}`);
+        const callback = update.callback_query;
+        if (callback?.data && callback.message) {
+          // A button press runs the same core handlers a typed message
+          // does, so the two paths cannot drift apart.
+          const chatId = callback.message.chat.id;
+          console.log(`[telegram] <- chat=${chatId} button=${callback.data}`);
+          await answerCallback(callback.id);
+          const reply = await handleAction(toIncoming(callback.message, ""), callback.data);
+          await sendReply(chatId, reply);
+          console.log(`[telegram] -> chat=${chatId} action replied`);
+        } else if (message && text) {
+          console.log(
+            `[telegram] <- chat=${message.chat.id}${isForwarded(message) ? " (forwarded)" : ""} ${JSON.stringify(text)}`,
+          );
           const reply = await handleMessage(message, text);
-          await sendMessage(message.chat.id, reply);
-          console.log(`[telegram] -> chat=${message.chat.id} replied (${reply.length} chars)`);
+          await sendReply(message.chat.id, reply);
+          console.log(`[telegram] -> chat=${message.chat.id} replied (${reply.text.length} chars)`);
         }
       } catch (err) {
         // Log loudly and still try to tell the seller something, so a
         // failure is never invisible on either side.
         console.error(`[telegram] FAILED update ${update.update_id}:`, err);
-        if (message) {
+        const failChat = message?.chat.id ?? update.callback_query?.message?.chat.id;
+        if (failChat != null) {
           await sendMessage(
-            message.chat.id,
+            failChat,
             "Something went wrong handling that message. Please try again.",
           ).catch(() => undefined);
         }

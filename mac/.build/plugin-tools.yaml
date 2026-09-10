@@ -1,0 +1,81 @@
+client:
+  name: basic
+  file-system: device-agnostic
+tools: {}
+targets:
+  "LikhoMac-arm64-apple-macosx15.0-debug.exe": ["<LikhoMac-arm64-apple-macosx15.0-debug.exe>"]
+  "LikhoMac-arm64-apple-macosx15.0-debug.module": ["<LikhoMac-arm64-apple-macosx15.0-debug.module>"]
+  "PackageStructure": ["<PackageStructure>"]
+  "main": ["<LikhoMac-arm64-apple-macosx15.0-debug.exe>","<LikhoMac-arm64-apple-macosx15.0-debug.module>"]
+  "test": ["<LikhoMac-arm64-apple-macosx15.0-debug.exe>","<LikhoMac-arm64-apple-macosx15.0-debug.module>"]
+default: "main"
+nodes:
+  "/Users/tanishk/likho/mac/Sources/LikhoMac/":
+    is-directory-structure: true
+    content-exclusion-patterns: [".git",".build"]
+  "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac":
+    is-mutated: true
+commands:
+  "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac-entitlement.plist":
+    tool: write-auxiliary-file
+    inputs: ["<entitlement-plist>","<com.apple.security.get-task-allow>"]
+    outputs: ["/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac-entitlement.plist"]
+    description: "Write auxiliary file /Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac-entitlement.plist"
+
+  "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/sources":
+    tool: write-auxiliary-file
+    inputs: ["<sources-file-list>","/Users/tanishk/likho/mac/Sources/LikhoMac/AppDelegate.swift","/Users/tanishk/likho/mac/Sources/LikhoMac/ClipboardCapture.swift","/Users/tanishk/likho/mac/Sources/LikhoMac/LikhoBridge.swift","/Users/tanishk/likho/mac/Sources/LikhoMac/ResultPopup.swift","/Users/tanishk/likho/mac/Sources/LikhoMac/main.swift"]
+    outputs: ["/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/sources"]
+    description: "Write auxiliary file /Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/sources"
+
+  "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.product/Objects.LinkFileList":
+    tool: write-auxiliary-file
+    inputs: ["<link-file-list>","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/AppDelegate.swift.o","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/ClipboardCapture.swift.o","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/LikhoBridge.swift.o","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/ResultPopup.swift.o","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/main.swift.o"]
+    outputs: ["/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.product/Objects.LinkFileList"]
+    description: "Write auxiliary file /Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.product/Objects.LinkFileList"
+
+  "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt":
+    tool: write-auxiliary-file
+    inputs: ["<swift-get-version>","/Library/Developer/CommandLineTools/usr/bin/swiftc"]
+    outputs: ["/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt"]
+    always-out-of-date: "true"
+    description: "Write auxiliary file /Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt"
+
+  "<LikhoMac-arm64-apple-macosx15.0-debug.exe>":
+    tool: phony
+    inputs: ["<LikhoMac-arm64-apple-macosx15.0-debug.exe-CodeSigning>"]
+    outputs: ["<LikhoMac-arm64-apple-macosx15.0-debug.exe>"]
+
+  "<LikhoMac-arm64-apple-macosx15.0-debug.module>":
+    tool: phony
+    inputs: ["/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/AppDelegate.swift.o","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/ClipboardCapture.swift.o","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/LikhoBridge.swift.o","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/ResultPopup.swift.o","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/main.swift.o","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/Modules/LikhoMac.swiftmodule"]
+    outputs: ["<LikhoMac-arm64-apple-macosx15.0-debug.module>"]
+
+  "C.LikhoMac-arm64-apple-macosx15.0-debug.exe":
+    tool: shell
+    inputs: ["/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/AppDelegate.swift.o","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/ClipboardCapture.swift.o","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/LikhoBridge.swift.o","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/ResultPopup.swift.o","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/main.swift.o","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.product/Objects.LinkFileList"]
+    outputs: ["/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac"]
+    description: "Linking ./.build/arm64-apple-macosx/debug/LikhoMac"
+    args: ["/Library/Developer/CommandLineTools/usr/bin/swiftc","-L","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug","-o","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac","-module-name","LikhoMac","-Xlinker","-no_warn_duplicate_libraries","-emit-executable","-Xlinker","-alias","-Xlinker","_LikhoMac_main","-Xlinker","_main","-Xlinker","-rpath","-Xlinker","@loader_path","@/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.product/Objects.LinkFileList","-target","arm64-apple-macosx13.0","-Xlinker","-add_ast_path","-Xlinker","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/Modules/LikhoMac.swiftmodule","-F","/Library/Developer/CommandLineTools/Library/Developer/Frameworks","-sdk","/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk","-g","-Xlinker","-rpath","-Xlinker","/Library/Developer/CommandLineTools/Library/Developer/Frameworks"]
+
+  "C.LikhoMac-arm64-apple-macosx15.0-debug.exe-entitlements":
+    tool: shell
+    inputs: ["/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac-entitlement.plist"]
+    outputs: ["<LikhoMac-arm64-apple-macosx15.0-debug.exe-CodeSigning>"]
+    description: "Applying debug entitlements to ./.build/arm64-apple-macosx/debug/LikhoMac"
+    args: ["codesign","--force","--sign","-","--entitlements","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac-entitlement.plist","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac"]
+
+  "C.LikhoMac-arm64-apple-macosx15.0-debug.module":
+    tool: shell
+    inputs: ["/Users/tanishk/likho/mac/Sources/LikhoMac/AppDelegate.swift","/Users/tanishk/likho/mac/Sources/LikhoMac/ClipboardCapture.swift","/Users/tanishk/likho/mac/Sources/LikhoMac/LikhoBridge.swift","/Users/tanishk/likho/mac/Sources/LikhoMac/ResultPopup.swift","/Users/tanishk/likho/mac/Sources/LikhoMac/main.swift","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/sources"]
+    outputs: ["/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/AppDelegate.swift.o","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/ClipboardCapture.swift.o","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/LikhoBridge.swift.o","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/ResultPopup.swift.o","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/main.swift.o","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/Modules/LikhoMac.swiftmodule"]
+    description: "Compiling Swift Module 'LikhoMac' (5 sources)"
+    args: ["/Library/Developer/CommandLineTools/usr/bin/swiftc","-module-name","LikhoMac","-emit-dependencies","-emit-module","-emit-module-path","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/Modules/LikhoMac.swiftmodule","-output-file-map","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/output-file-map.json","-incremental","-c","@/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/sources","-I","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/Modules","-target","arm64-apple-macosx13.0","-enable-batch-mode","-index-store-path","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/index/store","-Onone","-enable-testing","-j10","-DSWIFT_PACKAGE","-DDEBUG","-module-cache-path","/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/ModuleCache","-parseable-output","-Xfrontend","-entry-point-function-name","-Xfrontend","LikhoMac_main","-swift-version","5","-F","/Library/Developer/CommandLineTools/Library/Developer/Frameworks","-sdk","/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk","-g","-Xcc","-isysroot","-Xcc","/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk","-Xcc","-fPIC","-Xcc","-g","-package-name","mac"]
+
+  "PackageStructure":
+    tool: package-structure-tool
+    inputs: ["/Users/tanishk/likho/mac/Sources/LikhoMac/","/Users/tanishk/likho/mac/Package.swift","/Users/tanishk/likho/mac/Package.resolved"]
+    outputs: ["<PackageStructure>"]
+    description: "Planning build"
+    allow-missing-inputs: true
+

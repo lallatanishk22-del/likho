@@ -1,0 +1,35 @@
+{
+  "": {
+    "swift-dependencies": "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/master.swiftdeps"
+  },
+  "/Users/tanishk/likho/mac/Sources/LikhoMac/AppDelegate.swift": {
+    "dependencies": "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/AppDelegate.d",
+    "object": "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/AppDelegate.swift.o",
+    "swiftmodule": "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/AppDelegate~partial.swiftmodule",
+    "swift-dependencies": "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/AppDelegate.swiftdeps"
+  },
+  "/Users/tanishk/likho/mac/Sources/LikhoMac/ClipboardCapture.swift": {
+    "dependencies": "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/ClipboardCapture.d",
+    "object": "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/ClipboardCapture.swift.o",
+    "swiftmodule": "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/ClipboardCapture~partial.swiftmodule",
+    "swift-dependencies": "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/ClipboardCapture.swiftdeps"
+  },
+  "/Users/tanishk/likho/mac/Sources/LikhoMac/LikhoBridge.swift": {
+    "dependencies": "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/LikhoBridge.d",
+    "object": "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/LikhoBridge.swift.o",
+    "swiftmodule": "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/LikhoBridge~partial.swiftmodule",
+    "swift-dependencies": "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/LikhoBridge.swiftdeps"
+  },
+  "/Users/tanishk/likho/mac/Sources/LikhoMac/ResultPopup.swift": {
+    "dependencies": "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/ResultPopup.d",
+    "object": "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/ResultPopup.swift.o",
+    "swiftmodule": "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/ResultPopup~partial.swiftmodule",
+    "swift-dependencies": "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/ResultPopup.swiftdeps"
+  },
+  "/Users/tanishk/likho/mac/Sources/LikhoMac/main.swift": {
+    "dependencies": "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/main.d",
+    "object": "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/main.swift.o",
+    "swiftmodule": "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/main~partial.swiftmodule",
+    "swift-dependencies": "/Users/tanishk/likho/mac/.build/arm64-apple-macosx/debug/LikhoMac.build/main.swiftdeps"
+  }
+}

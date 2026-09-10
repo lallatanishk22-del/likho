@@ -9,9 +9,13 @@ import {
   getTodaysSales,
   addItemToBill,
   removeItemFromBill,
+  getBillByNo,
+  recordPayment,
+  setItemQuantity,
   type StoredBill,
 } from "./billStore.js";
 import { buildCatalogIndex } from "./catalog.js";
+import { classifyIntent } from "./intent.js";
 
 // Platform-independent command routing. Telegram polling (telegramBot.ts)
 // and the HTTP API used by n8n (apiServer.ts) both call handleIncoming(),
@@ -19,6 +23,22 @@ import { buildCatalogIndex } from "./catalog.js";
 // between them. Nothing here knows what Telegram is.
 
 export type Platform = "telegram" | "whatsapp";
+
+// A reply is text PLUS the actions a seller can take on it. The core names
+// the actions; each channel adapter decides how to show them (Telegram
+// inline buttons today, something else on WhatsApp later). Nothing here
+// knows what a button is.
+export interface ReplyAction {
+  label: string;
+  // Opaque to the channel: "confirm:1042". Routed back through
+  // handleAction() so a button press and a typed message run identical code.
+  action: string;
+}
+
+export interface Reply {
+  text: string;
+  actions?: ReplyAction[];
+}
 
 export interface IncomingMessage {
   platform: Platform;
@@ -31,64 +51,107 @@ export interface IncomingMessage {
   // else is handed to Likho without retyping it.
   repliedText?: string | null;
   repliedMessageId?: string | null;
+  // Text of a message the seller FORWARDED to Likho. Treated as the order
+  // itself: forwarding exists precisely so nothing has to be retyped.
+  forwardedText?: string | null;
   // Optional hook so a slow channel can show a "working on it" signal.
   onSlowWork?: () => Promise<void>;
 }
 
 // Renders a bill from STORED state, so the seller always sees exactly what
 // is persisted rather than a freshly recomputed guess.
-function renderStoredBill(stored: StoredBill): string {
-  const { session, items } = stored;
-  const lines: string[] = [];
-  if (session.customer_ref) {
-    lines.push(session.customer_ref.toUpperCase(), "");
-  }
-  for (const item of items) {
-    lines.push(`${item.name_snapshot} × ${item.quantity} — ₹${Number(item.line_total)}`);
-  }
-  lines.push("");
-  if (Number(session.discount_percent) > 0) {
-    lines.push(`Subtotal — ₹${Number(session.subtotal)}`);
-    lines.push(`Discount (${Number(session.discount_percent)}%) — −₹${Number(session.discount_amount)}`);
-  }
-  lines.push(`TOTAL — ₹${Number(session.total)}`);
-  lines.push("");
-  lines.push(`Bill #${session.id.slice(0, 8)} · ${session.status}`);
-  return lines.join("\n");
+function formatRupees(amount: number): string {
+  const n = Number(amount);
+  const hasPaise = Math.round(n * 100) % 100 !== 0;
+  return `\u20b9${n.toLocaleString("en-IN", {
+    minimumFractionDigits: hasPaise ? 2 : 0,
+    maximumFractionDigits: 2,
+  })}`;
 }
 
-const HELP = `Likho — send me the order, I'll make the bill.
+function titleCase(name: string): string {
+  return name.replace(/\b[a-z]/g, (c) => c.toUpperCase());
+}
 
-First, set your prices:
-  /add paneer 120
-  /add samosa 20
-  /add lassi 100
+// The bill as an ARTIFACT, not a paragraph: aligned columns, a real
+// transaction number, and an explicit payment state. Rendered from STORED
+// state so the seller always sees exactly what is persisted.
+function renderStoredBill(stored: StoredBill): string {
+  const { session, items } = stored;
 
-See them any time:
-  /prices
+  const rows = items.map((item) => ({
+    left: `${titleCase(item.name_snapshot)} \u00d7 ${item.quantity}`,
+    right: formatRupees(Number(item.line_total)),
+  }));
 
-Remove one:
-  /remove lassi
+  const summary: { left: string; right: string }[] = [];
+  if (Number(session.discount_percent) > 0) {
+    summary.push({ left: "Subtotal", right: formatRupees(Number(session.subtotal)) });
+    summary.push({
+      left: `Discount (${Number(session.discount_percent)}%)`,
+      right: `\u2212${formatRupees(Number(session.discount_amount))}`,
+    });
+  }
+  summary.push({ left: "TOTAL", right: formatRupees(Number(session.total)) });
 
-Then bill an order with /zbill:
-  /zbill 2 paneer, 4 samosa and 1 lassi
+  const width = Math.max(...[...rows, ...summary].map((r) => r.left.length)) + 3;
+  const line = (r: { left: string; right: string }) => r.left.padEnd(width) + r.right;
 
-No prices needed — I use your list.
+  const who = session.customer_ref ? `${titleCase(session.customer_ref)} \u2014 ` : "";
+  const paid =
+    session.payment_status === "paid"
+      ? "Paid"
+      : session.payment_status === "partial"
+        ? `Partly paid \u2014 ${formatRupees(Number(session.amount_paid))} of ${formatRupees(Number(session.total))}`
+        : "Pending";
 
-To bill someone else's message, long-press it → Reply → /zbill
+  return [
+    `\u{1f9fe} ${who}Bill #${session.bill_no}`,
+    "",
+    ...rows.map(line),
+    "\u2500".repeat(width + 8),
+    ...summary.map(line),
+    "",
+    `Payment: ${paid}`,
+  ].join("\n");
+}
 
-You can state a price to override your list for one bill:
-  /zbill 2 paneer 150
+// Actions offered alongside a bill. A draft's primary action is Confirm;
+// once confirmed the useful actions are payment and PDF.
+function billActions(stored: StoredBill): ReplyAction[] {
+  const no = stored.session.bill_no;
+  const actions: ReplyAction[] = [];
+  if (stored.session.status !== "finalized") {
+    actions.push({ label: "\u2705 Confirm", action: `confirm:${no}` });
+  }
+  if (stored.session.payment_status !== "paid") {
+    actions.push({ label: "\u{1f4b0} Mark Paid", action: `paid:${no}` });
+  }
+  actions.push({ label: "\u{1f4c4} PDF", action: `pdf:${no}` });
+  return actions;
+}
 
-Change the open bill:
-  /plus 2 chutney     add an item
-  /plus 2 chutney 15  add with a one-off price
-  /minus chutney      remove an item
+const HELP = `Likho \u2014 send me the order, I'll make the bill.
 
-Your current bill is remembered:
-  /bill    show it again
-  /done    mark it sent, count it in today's sales
-  /sales   today's total`;
+Just type it. No commands needed:
+  Ravi 2 paneer 1 lassi
+
+Or forward the customer's message straight to me.
+
+Set your rates first, one per line:
+  /add paneer 220
+  lassi 80
+  samosa 20
+
+Then talk to me normally:
+  actually paneer was 3    fix the open bill
+  add 2 samosa             add to it
+  remove lassi             take it off
+  show #1042               see any bill
+  #1042 paid               record payment
+  sales                    today's total
+
+Buttons on each bill do the same thing.`;
 
 // Accepts one item per line, so a seller can paste their whole price list
 // at once:
@@ -160,15 +223,17 @@ async function handleOrder(
   text: string,
   sourceMessageId: string | null,
   onSlowWork?: () => Promise<void>,
-): Promise<string> {
+): Promise<Reply> {
   await onSlowWork?.();
   const catalog = await loadCatalog(businessId);
 
   if (catalog.products.length === 0) {
-    return (
-      "Your price list is empty, so I can only bill orders that include prices.\n\n" +
-      "Add your prices first:\n  /add paneer 120\n\nOr state prices in the order:\n  2 paneer 120"
-    );
+    return {
+      text:
+        "Your price list is empty, so I can only bill orders that include prices.\n\n" +
+        "Send me your rates first, one per line:\n  paneer 120\n  samosa 20\n\n" +
+        "Or state the price in the order itself:\n  2 paneer 120",
+    };
   }
 
   try {
@@ -178,9 +243,9 @@ async function handleOrder(
     // at, edited and updated later. This is what makes it a transaction
     // rather than a one-off message.
     const stored = await createBillSession(businessId, parsed, bill, sourceMessageId);
-    return `${renderStoredBill(stored)}\n\n/done when you've sent it to the customer.`;
+    return { text: renderStoredBill(stored), actions: billActions(stored) };
   } catch (err) {
-    return (err as Error).message;
+    return { text: (err as Error).message };
   }
 }
 
@@ -191,18 +256,18 @@ async function handleOrder(
 //
 //   /plus 2 chutney        price from the seller's list
 //   /plus 2 chutney 15     price stated explicitly, wins
-async function handleAddItem(businessId: string, args: string): Promise<string> {
+async function handleAddItem(businessId: string, args: string): Promise<Reply> {
   const draft = await getCurrentDraft(businessId);
-  if (!draft) return "No open bill to add to. Start one with /zbill first.";
+  if (!draft) return { text: "No open bill yet. Send me an order and I'll make one." };
 
   const tokens = args.trim().split(/\s+/).filter((t) => t.length > 0);
   if (tokens.length < 2) {
-    return "Use: /plus <qty> <item> [price]\nExample: /plus 2 chutney";
+    return { text: "Tell me what to add, like:\n  add 2 chutney" };
   }
 
   const quantity = Number(tokens[0]);
   if (!Number.isInteger(quantity) || quantity <= 0) {
-    return `"${tokens[0]}" isn't a quantity. Try: /plus 2 chutney`;
+    return { text: `"${tokens[0]}" isn't a quantity. Try: add 2 chutney` };
   }
 
   // A trailing number is an explicit price for this bill only.
@@ -210,7 +275,7 @@ async function handleAddItem(businessId: string, args: string): Promise<string> 
   const hasStatedPrice = tokens.length > 2 && Number.isFinite(maybePrice) && maybePrice > 0;
   const name = (hasStatedPrice ? tokens.slice(1, -1) : tokens.slice(1)).join(" ");
 
-  if (name.length === 0) return "Which item? Try: /plus 2 chutney";
+  if (name.length === 0) return { text: "Which item? Try: add 2 chutney" };
 
   let unitPrice: number;
   let productId: string | null = null;
@@ -227,7 +292,7 @@ async function handleAddItem(businessId: string, args: string): Promise<string> 
     const singular = key.endsWith("es") ? key.slice(0, -2) : key.endsWith("s") ? key.slice(0, -1) : key;
     const match = index.byKey.get(key) ?? index.byKey.get(singular);
     if (!match) {
-      return `I don't have a price for "${name}". Add it with /add ${name} <price>, or state it: /plus ${quantity} ${name} 50`;
+      return { text: `I don't have a price for "${name}".\n\nSend me the rate:  ${name} 50\nOr state it here:  add ${quantity} ${name} 50` };
     }
     unitPrice = match.price;
     productId = match.id;
@@ -241,51 +306,147 @@ async function handleAddItem(businessId: string, args: string): Promise<string> 
     productId,
     priceSource,
   });
-  return `Added ${name} × ${quantity}.\n\n${renderStoredBill(updated)}`;
+  return { text: `Added ${name} × ${quantity}.\n\n${renderStoredBill(updated)}`, actions: billActions(updated) };
 }
 
-async function handleRemoveItem(businessId: string, args: string): Promise<string> {
+async function handleRemoveItem(businessId: string, args: string): Promise<Reply> {
   const draft = await getCurrentDraft(businessId);
-  if (!draft) return "No open bill to change. Start one with /zbill first.";
+  if (!draft) return { text: "No open bill to change. Send me an order first." };
 
   const name = args.trim();
-  if (name.length === 0) return "Use: /minus <item>\nExample: /minus chutney";
+  if (name.length === 0) return { text: "Which item should I remove?" };
 
   const updated = await removeItemFromBill(draft.session.id, name);
-  if (!updated) return `"${name}" isn't on this bill.`;
-  if (updated.items.length === 0) return "That was the last item — the bill is now empty.";
-  return `Removed ${name}.\n\n${renderStoredBill(updated)}`;
+  if (!updated) return { text: `"${name}" isn't on this bill.` };
+  if (updated.items.length === 0) return { text: "That was the last item — the bill is now empty." };
+  return { text: `Removed ${name}.\n\n${renderStoredBill(updated)}`, actions: billActions(updated) };
 }
 
-async function handleShowBill(businessId: string): Promise<string> {
+async function handleShowBill(businessId: string): Promise<Reply> {
   const draft = await getCurrentDraft(businessId);
-  if (!draft) return "No open bill. Send me an order and I'll make one.";
-  return renderStoredBill(draft);
+  if (!draft) return { text: "No open bill. Send me an order and I'll make one." };
+  return { text: renderStoredBill(draft), actions: billActions(draft) };
 }
 
-async function handleDone(businessId: string): Promise<string> {
-  const draft = await getCurrentDraft(businessId);
-  if (!draft) return "No open bill to close.";
-  await finalizeBill(draft.session.id);
+// Resolves which bill the seller means: the one they named ("#1042"), or
+// the one they're currently working on. Never guesses across businesses.
+async function resolveBill(businessId: string, billNo: number | null): Promise<StoredBill | null> {
+  if (billNo !== null) return getBillByNo(businessId, billNo);
+  return getCurrentDraft(businessId);
+}
+
+async function handleConfirm(businessId: string, billNo: number | null): Promise<Reply> {
+  const bill = await resolveBill(businessId, billNo);
+  if (!bill) return { text: "No open bill to confirm. Send me an order and I'll make one." };
+  if (bill.session.status === "finalized") {
+    return { text: `Bill #${bill.session.bill_no} is already confirmed.`, actions: billActions(bill) };
+  }
+
+  await finalizeBill(bill.session.id);
   const sales = await getTodaysSales(businessId);
-  return (
-    `Bill #${draft.session.id.slice(0, 8)} closed — ₹${Number(draft.session.total)}.\n\n` +
-    `Today: ${sales.count} bill(s), ₹${sales.total}`
-  );
+  const confirmed = {
+    ...bill,
+    session: { ...bill.session, status: "finalized" as const },
+  };
+  return {
+    text:
+      `${renderStoredBill(confirmed)}\n\n` +
+      `Confirmed. Today: ${sales.count} bill(s), ${formatRupees(Number(sales.total))}`,
+    actions: billActions(confirmed),
+  };
+}
+
+// Payment is recorded only from the SELLER's explicit statement. A customer
+// saying "paid" never reaches this — that is a claim, not a receipt.
+async function handlePayment(
+  businessId: string,
+  billNo: number | null,
+  amount: number | null,
+): Promise<Reply> {
+  const bill = await resolveBill(businessId, billNo);
+  if (!bill) {
+    return { text: "Which bill was paid? Tell me the number, like: #1042 paid" };
+  }
+
+  const updated = await recordPayment(bill.session.id, amount);
+  if (!updated) return { text: "Couldn't find that bill." };
+
+  const note =
+    updated.session.payment_status === "paid"
+      ? `Marked #${updated.session.bill_no} paid in full.`
+      : `Recorded ${formatRupees(Number(updated.session.amount_paid))} against #${updated.session.bill_no}. ` +
+        `${formatRupees(Number(updated.session.total) - Number(updated.session.amount_paid))} still due.`;
+
+  return { text: `${note}\n\n${renderStoredBill(updated)}`, actions: billActions(updated) };
+}
+
+async function handleDone(businessId: string): Promise<Reply> {
+  return handleConfirm(businessId, null);
 }
 
 async function handleSales(businessId: string): Promise<string> {
   const sales = await getTodaysSales(businessId);
-  if (sales.count === 0) return "No bills closed today yet.";
-  return `Today's sales\n\n${sales.count} bill(s)\n₹${sales.total} billed`;
+  if (sales.count === 0) return "No bills confirmed today yet.";
+  return `Today's sales\n\n${sales.count} bill(s)\n${formatRupees(Number(sales.total))} billed`;
 }
 
-// Every command Likho understands. Used to split one message into the
-// sequence of commands it actually contains.
+// A correction ("actually paneer was 3") changes the bill that is already
+// open. It is routed through the SAME deterministic edit path as an
+// explicit "/plus" — the seller is stating a fact about their own order,
+// so there is nothing to infer and nothing to approve.
+async function handleCorrection(businessId: string, text: string): Promise<Reply> {
+  const draft = await getCurrentDraft(businessId);
+  if (!draft) {
+    return { text: "There's no open bill to correct. Send me the order and I'll make one." };
+  }
+
+  // "actually paneer was 3" / "make it 3 paneer" / "change paneer to 3"
+  const lower = text.toLowerCase();
+  const patterns = [
+    /(?:actually\s+)?([a-z ]+?)\s+(?:was|is|to|hai)\s+(\d+)/i,
+    /(?:make it|change|update)\s+(\d+)\s+([a-z ]+)/i,
+    /(\d+)\s+([a-z ]+?)\s*$/i,
+  ];
+
+  for (const pattern of patterns) {
+    const m = lower.match(pattern);
+    if (!m) continue;
+    const [a, b] = [m[1]!.trim(), m[2]!.trim()];
+    const quantity = Number(/^\d+$/.test(a) ? a : b);
+    const name = /^\d+$/.test(a) ? b : a;
+    if (!Number.isInteger(quantity) || quantity <= 0 || name.length === 0) continue;
+
+    const onBill = draft.items.find(
+      (i) => i.name_snapshot.toLowerCase() === name || name.includes(i.name_snapshot.toLowerCase()),
+    );
+    if (!onBill) continue;
+
+    const updated = await setItemQuantity(draft.session.id, onBill.id, quantity);
+    return {
+      text: `Updated ${titleCase(onBill.name_snapshot)} to \u00d7 ${quantity}.\n\n${renderStoredBill(updated)}`,
+      actions: billActions(updated),
+    };
+  }
+
+  return {
+    text:
+      "I didn't catch what changed. Tell me like:\n" +
+      "  paneer was 3\n  add 2 lassi\n  remove chutney",
+  };
+}
+
+const GREETING_REPLY =
+  "Hi! Send me an order and I'll make the bill.\n\n" +
+  "  Ravi 2 paneer 1 lassi\n\n" +
+  "You can also forward a customer's message straight to me.";
+
+// Every command Likho understands. Commands are now OPTIONAL shortcuts —
+// normal typing is handled by the intent layer — but they stay supported
+// because a seller who learned them shouldn't be broken.
 const KNOWN_COMMANDS = [
   "/start", "/help", "/add", "/prices", "/list", "/remove",
   "/zbill", "/plus", "/additem", "/minus", "/removeitem",
-  "/bill", "/done", "/sales",
+  "/bill", "/done", "/sales", "/paid",
 ];
 
 export interface ParsedCommand {
@@ -296,21 +457,18 @@ export interface ParsedCommand {
 // THE RULE: one message = a sequence of commands, run top to bottom.
 //
 // A command starts at the beginning of a line, or mid-line after
-// whitespace. Everything up to the next command is its arguments. This is
-// what makes all of these behave the way a seller expects:
+// whitespace. Everything up to the next command is its arguments:
 //
 //   /add samosa 20\nchai 15         -> one /add, two lines of arguments
 //   /zbill 2 chai\n/plus 1 mithai   -> two commands
 //   /zbill 2 chai /plus 1 mithai    -> two commands (same line)
 //
 // Splitting deterministically here means the model never has to guess
-// whether "/add mithai 10" was an instruction or part of an order — a
-// question it got wrong repeatedly.
+// whether "/add mithai 10" was an instruction or part of an order.
 export function splitCommands(text: string): ParsedCommand[] {
   const trimmed = text.trim();
   if (trimmed.length === 0) return [];
 
-  // Locate every known command occurrence at a valid boundary.
   const hits: { index: number; command: string }[] = [];
   for (const cmd of KNOWN_COMMANDS) {
     const pattern = new RegExp(`(^|\\s)(${cmd})(?=\\s|$)`, "gi");
@@ -323,8 +481,6 @@ export function splitCommands(text: string): ParsedCommand[] {
 
   hits.sort((a, b) => a.index - b.index);
 
-  // Anything before the first command is not a command — ignore it rather
-  // than silently folding it into one.
   const parsed: ParsedCommand[] = [];
   for (let i = 0; i < hits.length; i++) {
     const hit = hits[i]!;
@@ -338,32 +494,129 @@ export function splitCommands(text: string): ParsedCommand[] {
   return parsed;
 }
 
-export async function handleIncoming(incoming: IncomingMessage): Promise<string> {
-  const { platform, platformUserId, displayName, text, onSlowWork } = incoming;
-  const sourceMessageId = incoming.messageId ?? null;
+async function resolveBusiness(incoming: IncomingMessage): Promise<string> {
+  return getOrCreateBusinessForChannel(
+    incoming.platform,
+    incoming.platformUserId,
+    incoming.displayName,
+  );
+}
 
+export async function handleIncoming(incoming: IncomingMessage): Promise<Reply> {
   let businessId: string;
   try {
-    businessId = await getOrCreateBusinessForChannel(platform, platformUserId, displayName);
+    businessId = await resolveBusiness(incoming);
   } catch (err) {
-    return `Couldn't reach the price store: ${(err as Error).message}`;
+    return { text: `Couldn't reach the price store: ${(err as Error).message}` };
   }
 
-  const trimmed = text.trim();
+  // A forwarded message IS the order. The seller forwarded it precisely so
+  // they wouldn't have to retype it, so it is treated as the order text
+  // with no command required.
+  const orderText = incoming.forwardedText?.trim();
+  const trimmed = (orderText && orderText.length > 0 ? orderText : incoming.text).trim();
+  const sourceMessageId = incoming.messageId ?? null;
+
   const commands = splitCommands(trimmed);
 
-  // More than one command in a message: run them in order and return every
-  // reply, so "/zbill 2 chai /plus 1 mithai" does both things.
-  if (commands.length > 1) {
-    const replies: string[] = [];
+  // Explicit commands still win — a seller who typed one meant it.
+  if (commands.length > 1 || (commands[0] && commands[0].command !== "")) {
+    const replies: Reply[] = [];
     for (const c of commands) {
       replies.push(await runCommand(businessId, incoming, c.command, c.args, trimmed, sourceMessageId));
     }
-    return replies.join("\n\n———\n\n");
+    if (replies.length === 1) return replies[0]!;
+    return {
+      text: replies.map((r) => r.text).join("\n\n———\n\n"),
+      // Actions from the LAST reply — that's the state the seller ends on.
+      actions: replies[replies.length - 1]!.actions,
+    };
   }
 
-  const only = commands[0] ?? { command: "", args: trimmed };
-  return runCommand(businessId, incoming, only.command, only.args, trimmed, sourceMessageId);
+  // No command: the conversation layer decides.
+  return runIntent(businessId, incoming, trimmed, sourceMessageId);
+}
+
+// Natural-language dispatch. This is what makes commands optional.
+async function runIntent(
+  businessId: string,
+  incoming: IncomingMessage,
+  text: string,
+  sourceMessageId: string | null,
+): Promise<Reply> {
+  const intent = classifyIntent(text);
+
+  try {
+    switch (intent.name) {
+      case "help":
+        return { text: HELP };
+      case "greeting":
+        return { text: GREETING_REPLY };
+      case "prices":
+        return { text: await handlePrices(businessId) };
+      case "sales":
+        return { text: await handleSales(businessId) };
+      case "show_bill": {
+        const bill = await resolveBill(businessId, intent.billNo);
+        if (!bill) {
+          return {
+            text: intent.billNo
+              ? `I don't have a bill #${intent.billNo}.`
+              : "No open bill. Send me an order and I'll make one.",
+          };
+        }
+        return { text: renderStoredBill(bill), actions: billActions(bill) };
+      }
+      case "confirm":
+        return await handleConfirm(businessId, intent.billNo);
+      case "payment":
+        return await handlePayment(businessId, intent.billNo, intent.amount);
+      case "pdf":
+        return { text: "PDF export isn't ready yet — the bill above is the record for now." };
+      case "add_item":
+        // Same deterministic edit path "/plus" uses — no model involved,
+        // because the seller is stating exactly what they want.
+        return await handleAddItem(businessId, intent.text);
+      case "remove_item":
+        return await handleRemoveItem(businessId, intent.text);
+      case "correction":
+        return await handleCorrection(businessId, text);
+      case "order":
+      default:
+        return await handleOrder(businessId, text, sourceMessageId, incoming.onSlowWork);
+    }
+  } catch (err) {
+    return { text: `Something went wrong: ${(err as Error).message}` };
+  }
+}
+
+// A button press runs the SAME handlers a typed message does, so the two
+// can never drift apart. The action string is opaque to the channel.
+export async function handleAction(incoming: IncomingMessage, action: string): Promise<Reply> {
+  let businessId: string;
+  try {
+    businessId = await resolveBusiness(incoming);
+  } catch (err) {
+    return { text: `Couldn't reach the price store: ${(err as Error).message}` };
+  }
+
+  const [verb, rawNo] = action.split(":");
+  const billNo = rawNo && /^\d+$/.test(rawNo) ? Number(rawNo) : null;
+
+  try {
+    switch (verb) {
+      case "confirm":
+        return await handleConfirm(businessId, billNo);
+      case "paid":
+        return await handlePayment(businessId, billNo, null);
+      case "pdf":
+        return { text: "PDF export isn't ready yet — the bill above is the record for now." };
+      default:
+        return { text: "That action isn't available." };
+    }
+  } catch (err) {
+    return { text: `Something went wrong: ${(err as Error).message}` };
+  }
 }
 
 async function runCommand(
@@ -373,35 +626,30 @@ async function runCommand(
   args: string,
   trimmed: string,
   sourceMessageId: string | null,
-): Promise<string> {
+): Promise<Reply> {
   const { onSlowWork } = incoming;
   try {
     switch (command) {
       case "/start":
       case "/help":
-        return HELP;
+        return { text: HELP };
       case "/add":
-        return await handleAdd(businessId, args);
+        return { text: await handleAdd(businessId, args) };
       case "/prices":
       case "/list":
-        return await handlePrices(businessId);
+        return { text: await handlePrices(businessId) };
       case "/remove":
-        return await handleRemove(businessId, args);
+        return { text: await handleRemove(businessId, args) };
       case "/zbill": {
-        // Order text comes from the replied-to message if there is one
-        // (the "send this to Likho" gesture), otherwise from the rest of
-        // this message.
         const replied = incoming.repliedText?.trim();
         const orderText = args.trim().length > 0 ? args.trim() : replied ?? "";
         if (orderText.length === 0) {
-          return (
-            "Send the order with it, or reply to the customer's message:\n" +
-            "  /zbill 2 paneer 3 samosa\n\n" +
-            "Or long-press their order → Reply → /zbill"
-          );
+          return {
+            text:
+              "Send the order with it, or reply to the customer's message:\n" +
+              "  /zbill 2 paneer 3 samosa",
+          };
         }
-        // When billing a replied-to message, anchor the bill to THAT
-        // message so Check Updates later knows where to resume from.
         const anchorId =
           replied && args.trim().length === 0 && incoming.repliedMessageId
             ? incoming.repliedMessageId
@@ -418,24 +666,16 @@ async function runCommand(
         return await handleShowBill(businessId);
       case "/done":
         return await handleDone(businessId);
+      case "/paid":
+        return await handlePayment(businessId, null, null);
       case "/sales":
-        return await handleSales(businessId);
+        return { text: await handleSales(businessId) };
       default:
-        if (command.startsWith("/")) return `Unknown command.\n\n${HELP}`;
-        // A bill is only ever created when the seller explicitly asks for
-        // one. Untriggered text is answered instantly without touching the
-        // model — it costs nothing, it stops "hi" being parsed as an order,
-        // and it is the same habit that keeps Likho out of the way when
-        // this moves into real customer conversations.
-        return (
-          "Send it with /zbill and I'll make the bill:\n" +
-          `  /zbill ${/\d/.test(trimmed) && trimmed.length <= 60 ? trimmed : "2 paneer 3 samosa"}\n\n` +
-          "Or reply to the customer's order → /zbill\n\n" +
-          "/help for everything else."
-        );
+        // An unrecognised slash command is a typo, not an order — never
+        // silently bill it.
+        return { text: `I don't know that command.\n\n${HELP}` };
     }
   } catch (err) {
-    return `Something went wrong: ${(err as Error).message}`;
+    return { text: `Something went wrong: ${(err as Error).message}` };
   }
 }
-
