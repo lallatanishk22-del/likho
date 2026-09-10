@@ -244,8 +244,22 @@ export async function addItemToBill(
   item: { name: string; quantity: number; unitPrice: number; productId: string | null; priceSource: "stated" | "catalog" | "manual" },
 ): Promise<StoredBill> {
   const existing = (await rest(
-    `bill_items?bill_session_id=eq.${sessionId}&select=position`,
-  )) as { position: number }[];
+    `bill_items?bill_session_id=eq.${sessionId}&order=position.asc&select=*`,
+  )) as BillItemRow[];
+
+  // Adding an item the bill already has at the same price increases that
+  // line instead of opening a second one. Two "Lassi" rows on one bill is
+  // confusing to read out to a customer, and it is never what the seller
+  // meant by "add 2 lassi".
+  const sameLine = existing.find(
+    (i) =>
+      i.name_snapshot.toLowerCase() === item.name.toLowerCase() &&
+      Number(i.unit_price) === item.unitPrice,
+  );
+  if (sameLine) {
+    return setItemQuantity(sessionId, sameLine.id, sameLine.quantity + item.quantity);
+  }
+
   const nextPosition = existing.length === 0 ? 0 : Math.max(...existing.map((e) => e.position)) + 1;
 
   await rest("bill_items", {

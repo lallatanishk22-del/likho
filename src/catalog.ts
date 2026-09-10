@@ -8,11 +8,24 @@
 //      deterministic lookup. The LLM never sees or chooses it.
 //   3. Neither -> left unresolved, which becomes a clarification.
 //
-// Matching is deliberately strict: exact name, registered alias, or simple
-// singular/plural. NO fuzzy/edit-distance matching — a near-miss would
-// silently attach the wrong price to an item, which is exactly the class of
-// error the whole trust layer exists to prevent. An unmatched item asks the
-// seller instead of guessing.
+// Matching runs in tiers, strictest first:
+//   1. exact name / registered alias / simple singular-plural
+//   2. repeat-squeezed  ("lasssi" -> "lassi", "daal" -> "dal")
+//   3. edit distance, length-scaled, with a UNIQUE winner required
+//
+// Tiers 2 and 3 exist because a real seller types "lasssi" and "panner",
+// and refusing to bill over one letter is useless. They are kept safe by
+// three rules, not by optimism:
+//   - the typed name must be long enough for a typo to be distinguishable
+//     from a different product ("tea"/"sea" are never matched)
+//   - exactly ONE product may be within range; a tie refuses and asks
+//   - the CANONICAL catalog name goes on the bill, so a wrong match is
+//     visible to the seller before they confirm
+//
+// This is deliberately NOT embeddings/RAG. Semantic similarity is the wrong
+// question: "lassi" and "chai" are both cold drinks and score highly, while
+// "lassi"/"lasssi" is a spelling accident with no semantic content at all.
+// Edit distance measures the thing that actually went wrong.
 
 export interface CatalogProduct {
   id: string;
@@ -38,6 +51,63 @@ function singularize(name: string): string {
   return name;
 }
 
+// Collapses runs of repeated letters: "lasssi" -> "lasi", "lassi" -> "lasi",
+// "daal" -> "dal", "rotti" -> "roti". Catches the single most common typo
+// class (a doubled or missed repeated letter) with no distance maths.
+function squeezeRepeats(name: string): string {
+  return name.replace(/(.)\1+/g, "$1");
+}
+
+// Damerau-Levenshtein (optimal string alignment), with an early bail-out
+// once every cell in a row exceeds the budget.
+//
+// Plain Levenshtein was wrong here: it scores a transposition as TWO edits,
+// so "smaosa" -> "samosa" cost 2 — the same as two unrelated substitutions.
+// Transposing adjacent letters is one of the most common ways a person
+// mistypes a word, so it is counted as the single slip it actually is.
+function editDistance(a: string, b: string, max: number): number {
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+
+  const n = a.length;
+  const m = b.length;
+  let prev2: number[] = [];
+  let prev = Array.from({ length: m + 1 }, (_, i) => i);
+
+  for (let i = 1; i <= n; i++) {
+    const row = [i];
+    let rowMin = i;
+    for (let j = 1; j <= m; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      let value = Math.min(row[j - 1]! + 1, prev[j]! + 1, prev[j - 1]! + cost);
+      // Adjacent transposition: "ab" typed where "ba" was meant.
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        value = Math.min(value, prev2[j - 2]! + 1);
+      }
+      row.push(value);
+      if (value < rowMin) rowMin = value;
+    }
+    if (rowMin > max) return max + 1;
+    prev2 = prev;
+    prev = row;
+  }
+  return prev[m]!;
+}
+
+// How wrong a name is allowed to be, by its length.
+//
+// Tight on purpose. Counting a transposition as one edit already covers
+// most real typos, so the budget buys safety rather than recall:
+//   <= 3   no slack at all — at three letters, one substitution is the
+//          difference between two different products ("tea"/"sea")
+//   4-7    one slip
+//   >= 8   two, because a long name has more room for a genuine typo and
+//          far less chance of colliding with a different product
+function distanceBudget(length: number): number {
+  if (length <= 3) return 0;
+  if (length <= 7) return 1;
+  return 2;
+}
+
 function candidateKeys(name: string): string[] {
   const norm = normalizeName(name);
   const keys = new Set<string>([norm, singularize(norm)]);
@@ -51,11 +121,19 @@ function candidateKeys(name: string): string[] {
 interface CatalogIndex {
   byKey: Map<string, CatalogProduct>;
   ambiguousKeys: Set<string>;
+  // Tier 2: repeat-squeezed forms of every name and alias.
+  bySqueezed: Map<string, CatalogProduct>;
+  ambiguousSqueezed: Set<string>;
+  // Tier 3 search space: every known key, for edit-distance comparison.
+  allKeys: { key: string; product: CatalogProduct }[];
 }
 
 export function buildCatalogIndex(catalog: PriceCatalog): CatalogIndex {
   const byKey = new Map<string, CatalogProduct>();
   const ambiguousKeys = new Set<string>();
+  const bySqueezed = new Map<string, CatalogProduct>();
+  const ambiguousSqueezed = new Set<string>();
+  const allKeys: { key: string; product: CatalogProduct }[] = [];
 
   for (const product of catalog.products) {
     const names = [product.name, ...product.aliases];
@@ -67,11 +145,77 @@ export function buildCatalogIndex(catalog: PriceCatalog): CatalogIndex {
         } else {
           byKey.set(key, product);
         }
+        allKeys.push({ key, product });
+
+        const squeezed = squeezeRepeats(key);
+        const existingSqueezed = bySqueezed.get(squeezed);
+        if (existingSqueezed && existingSqueezed.id !== product.id) {
+          ambiguousSqueezed.add(squeezed);
+        } else {
+          bySqueezed.set(squeezed, product);
+        }
       }
     }
   }
 
-  return { byKey, ambiguousKeys };
+  return { byKey, ambiguousKeys, bySqueezed, ambiguousSqueezed, allKeys };
+}
+
+export type MatchKind = "exact" | "near";
+
+export interface CatalogMatch {
+  product: CatalogProduct;
+  kind: MatchKind;
+}
+
+// The full tiered lookup. Returns null when nothing is close enough, and
+// "ambiguous" when more than one product is equally close — which must ask
+// the seller, never pick a side.
+export function findProduct(
+  name: string,
+  index: CatalogIndex,
+): CatalogMatch | "ambiguous" | null {
+  const keys = candidateKeys(name);
+
+  // Tier 1: exact.
+  if (keys.some((k) => index.ambiguousKeys.has(k))) return "ambiguous";
+  for (const key of keys) {
+    const hit = index.byKey.get(key);
+    if (hit) return { product: hit, kind: "exact" };
+  }
+
+  // Tier 2: repeat-squeezed.
+  for (const key of keys) {
+    const squeezed = squeezeRepeats(key);
+    if (index.ambiguousSqueezed.has(squeezed)) return "ambiguous";
+    const hit = index.bySqueezed.get(squeezed);
+    if (hit) return { product: hit, kind: "near" };
+  }
+
+  // Tier 3: edit distance. A winner must be strictly closer than every
+  // other product — a tie is a genuine ambiguity, not a coin toss.
+  const typed = keys[0] ?? "";
+  const budget = distanceBudget(typed.length);
+  if (budget === 0) return null;
+
+  let best: { product: CatalogProduct; distance: number } | null = null;
+  let runnerUpDistance = Number.POSITIVE_INFINITY;
+
+  for (const { key, product } of index.allKeys) {
+    const distance = editDistance(typed, key, budget);
+    if (distance > budget) continue;
+
+    if (!best || distance < best.distance) {
+      if (best && best.product.id !== product.id) runnerUpDistance = best.distance;
+      best = { product, distance };
+    } else if (best.product.id !== product.id && distance < runnerUpDistance) {
+      runnerUpDistance = distance;
+    }
+  }
+
+  if (!best) return null;
+  if (runnerUpDistance <= best.distance) return "ambiguous";
+  return { product: best.product, kind: "near" };
 }
 
 // Thrown when prices cannot be resolved from the price store. Distinct
@@ -133,11 +277,13 @@ export function resolvePrices(
     // explicit instruction for this order, and it stays subject to the
     // existing message-grounding check downstream.
     if (typeof item.unitPrice === "number" && item.unitPrice > 0) {
-      const match = candidateKeys(item.name)
-        .map((k) => index.byKey.get(k))
-        .find((p): p is CatalogProduct => p !== undefined);
+      // A stated price is the seller's explicit instruction, so it bills
+      // even for an item that isn't in the price list at all. The lookup
+      // here only attaches a product id when one is unambiguous.
+      const found = findProduct(item.name, index);
+      const match = found !== null && found !== "ambiguous" ? found.product : null;
       resolved.push({
-        name: item.name,
+        name: match ? match.name : item.name,
         quantity: item.quantity,
         unitPrice: item.unitPrice,
         priceSource: "stated",
@@ -147,28 +293,26 @@ export function resolvePrices(
       continue;
     }
 
-    const keys = candidateKeys(item.name);
+    const found = findProduct(item.name, index);
 
-    if (keys.some((k) => index.ambiguousKeys.has(k))) {
+    if (found === "ambiguous") {
       unresolved.push({ name: item.name, reason: "ambiguous_in_catalog" });
       continue;
     }
-
-    const match = keys
-      .map((k) => index.byKey.get(k))
-      .find((p): p is CatalogProduct => p !== undefined);
-
-    if (!match) {
+    if (found === null) {
       unresolved.push({ name: item.name, reason: "not_in_catalog" });
       continue;
     }
 
     resolved.push({
-      name: item.name,
+      // The CANONICAL name goes on the bill, not what was typed. A seller
+      // who wrote "lasssi" sees "Lassi x 1" and can catch a wrong match
+      // before confirming — which is what makes near-matching safe.
+      name: found.product.name,
       quantity: item.quantity,
-      unitPrice: match.price,
+      unitPrice: found.product.price,
       priceSource: "catalog",
-      productId: match.id,
+      productId: found.product.id,
       evidence: item.evidence,
     });
   }
@@ -185,7 +329,8 @@ export function describeUnresolved(unresolved: UnresolvedItem[]): string {
   if (notInCatalog.length > 0) {
     const names = notInCatalog.map((u) => `"${u.name}"`).join(", ");
     parts.push(
-      `I don't have a price for ${names}. Add it to your price list, or state the price in the order.`,
+      `I don't have a price for ${names}.\n\nAdd it:  /add ${notInCatalog[0]!.name} 100\n` +
+        `Or state it in the order:  2 ${notInCatalog[0]!.name} 100`,
     );
   }
   if (ambiguous.length > 0) {

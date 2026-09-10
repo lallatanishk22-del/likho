@@ -14,7 +14,7 @@ import {
   setItemQuantity,
   type StoredBill,
 } from "./billStore.js";
-import { buildCatalogIndex } from "./catalog.js";
+import { buildCatalogIndex, findProduct } from "./catalog.js";
 import { classifyIntent } from "./intent.js";
 import { parsePriceList } from "./priceList.js";
 
@@ -264,30 +264,36 @@ async function handleAddItem(businessId: string, args: string): Promise<Reply> {
   // A trailing number is an explicit price for this bill only.
   const maybePrice = Number(tokens[tokens.length - 1]);
   const hasStatedPrice = tokens.length > 2 && Number.isFinite(maybePrice) && maybePrice > 0;
-  const name = (hasStatedPrice ? tokens.slice(1, -1) : tokens.slice(1)).join(" ");
+  const rawName = (hasStatedPrice ? tokens.slice(1, -1) : tokens.slice(1)).join(" ");
 
-  if (name.length === 0) return { text: "Which item? Try: add 2 chutney" };
+  if (rawName.length === 0) return { text: "Which item? Try: add 2 chutney" };
 
   let unitPrice: number;
   let productId: string | null = null;
   let priceSource: "stated" | "catalog" | "manual";
+  let name = rawName;
 
   if (hasStatedPrice) {
     unitPrice = maybePrice;
     priceSource = "manual";
   } else {
-    // Same price store and same strict matching the order path uses.
+    // Same price store and the SAME tiered matching the order path uses,
+    // so "add 2 lasssi" behaves identically to billing "2 lasssi".
     const catalog = await loadCatalog(businessId);
     const index = buildCatalogIndex(catalog);
-    const key = name.toLowerCase().replace(/[^a-z0-9 ]/g, "").trim();
-    const singular = key.endsWith("es") ? key.slice(0, -2) : key.endsWith("s") ? key.slice(0, -1) : key;
-    const match = index.byKey.get(key) ?? index.byKey.get(singular);
+    const found = findProduct(name, index);
+    if (found === "ambiguous") {
+      return { text: `"${name}" matches more than one item in your price list. Which one?` };
+    }
+    const match = found?.product ?? null;
     if (!match) {
       return { text: `I don't have a price for "${name}".\n\nSend me the rate:  ${name} 50\nOr state it here:  add ${quantity} ${name} 50` };
     }
     unitPrice = match.price;
     productId = match.id;
     priceSource = "catalog";
+    // Canonical name on the bill, so a near-match is visible.
+    name = match.name;
   }
 
   const updated = await addItemToBill(draft.session.id, {
