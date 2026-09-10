@@ -80,3 +80,41 @@ test("a unique near match wins", () => {
 test("nothing close enough returns null", () => {
   assert.equal(suggestFromList("biryani", ["paneer", "samosa"]), null);
 });
+
+// --- One-tap fix encoding ----------------------------------------------
+// Telegram caps callback_data at 64 BYTES.
+
+import { encodeFix, decodeFix } from "../src/messageHandler.js";
+
+test("a normal rename round-trips through a button", () => {
+  const action = encodeFix("panner", "paneer")!;
+  assert.deepEqual(decodeFix(action), { from: "panner", to: "paneer" });
+});
+
+test("multi-word names round-trip", () => {
+  const action = encodeFix("panner butter masala", "paneer butter masala")!;
+  assert.deepEqual(decodeFix(action), {
+    from: "panner butter masala",
+    to: "paneer butter masala",
+  });
+});
+
+test("names too long for a button return null rather than truncating", () => {
+  // A truncated name would rename the WRONG product. No button is offered
+  // and the seller gets the typed command instead.
+  const long = "a".repeat(40);
+  assert.equal(encodeFix(long, long), null);
+});
+
+test("the encoded action fits Telegram's 64-byte cap", () => {
+  const action = encodeFix("panner butter masala", "paneer butter masala")!;
+  assert.ok(Buffer.byteLength(action, "utf8") <= 64);
+});
+
+test("a non-fix action is not decoded as one", () => {
+  assert.equal(decodeFix("confirm:1042"), null);
+});
+
+test("a malformed fix action is rejected", () => {
+  assert.equal(decodeFix("fix:paneer"), null);
+});

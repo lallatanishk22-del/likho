@@ -167,17 +167,18 @@ Buttons on each bill do the same thing.`;
 // Saves prices in whatever shape the seller typed them — see priceList.ts.
 // Partial success is deliberate: an unreadable fragment must never discard
 // the items that WERE understood.
-async function handleAdd(businessId: string, args: string): Promise<string> {
+async function handleAdd(businessId: string, args: string): Promise<Reply> {
   const { entries, unreadable } = parsePriceList(args);
 
   if (entries.length === 0 && unreadable.length === 0) {
-    return (
-      "Tell me your rates. Any of these work:\n" +
-      "  /add paneer 220\n" +
-      "  /add 220 paneer\n" +
-      "  /add paneer 220, lassi 80\n\n" +
-      "Or one per line."
-    );
+    return {
+      text:
+        "Tell me your rates. Any of these work:\n" +
+        "  /add paneer 220\n" +
+        "  /add 220 paneer\n" +
+        "  /add paneer 220, lassi 80\n\n" +
+        "Or one per line.",
+    };
   }
 
   const saved: string[] = [];
@@ -198,15 +199,26 @@ async function handleAdd(businessId: string, args: string): Promise<string> {
   if (saved.length > 0) {
     parts.push(`Saved ${saved.length} item(s):\n${saved.map((s) => `  ${s}`).join("\n")}`);
   }
+  const actions: ReplyAction[] = [];
   if (suggestions.length > 0) {
-    const lines = suggestions.map((s) => `  "${s.typed}" \u2192 "${s.suggested}"?`);
+    const lines = suggestions.map((x) => `  "${x.typed}" \u2192 "${x.suggested}"?`);
+    const fixable = suggestions.filter((x) => encodeFix(x.typed, x.suggested) !== null);
+
     parts.push(
       `${suggestions.length === 1 ? "One name looks" : "Some names look"} like a spelling slip:\n` +
         `${lines.join("\n")}\n\n` +
-        `This is what prints on the customer's bill. To change it:\n` +
-        `  rename ${suggestions[0]!.typed} to ${suggestions[0]!.suggested}\n` +
-        `Or ignore this if the spelling is deliberate.`,
+        `This is what prints on the customer's bill.` +
+        (fixable.length === suggestions.length
+          ? `\nTap to fix, or ignore it if the spelling is deliberate.`
+          : `\n\nTo change one:  rename ${suggestions[0]!.typed} to ${suggestions[0]!.suggested}`),
     );
+
+    for (const x of fixable) {
+      actions.push({
+        label: `\u270f\ufe0f ${x.typed} \u2192 ${x.suggested}`,
+        action: encodeFix(x.typed, x.suggested)!,
+      });
+    }
   }
   if (unreadable.length > 0) {
     parts.push(
@@ -214,7 +226,7 @@ async function handleAdd(businessId: string, args: string): Promise<string> {
         `Send it as "${unreadable[0]} 100" and I'll save it.`,
     );
   }
-  return parts.join("\n\n");
+  return { text: parts.join("\n\n"), actions: actions.length > 0 ? actions : undefined };
 }
 
 // Renaming keeps the product's id, so bills that already used it stay
@@ -561,6 +573,24 @@ const KNOWN_COMMANDS = [
   "/bill", "/done", "/sales", "/paid", "/open", "/rename",
 ];
 
+// Telegram caps callback_data at 64 BYTES. A rename carries two arbitrary
+// product names, so it can overflow — in which case no button is offered
+// and the seller is given the typed command instead. Returning null rather
+// than truncating matters: a truncated name would rename the wrong thing.
+const FIX_SEPARATOR = "\u001f"; // unit separator; cannot occur in a product name
+
+export function encodeFix(from: string, to: string): string | null {
+  const action = `fix:${from}${FIX_SEPARATOR}${to}`;
+  return Buffer.byteLength(action, "utf8") <= 64 ? action : null;
+}
+
+export function decodeFix(action: string): { from: string; to: string } | null {
+  if (!action.startsWith("fix:")) return null;
+  const [from, to] = action.slice(4).split(FIX_SEPARATOR);
+  if (!from || !to) return null;
+  return { from, to };
+}
+
 export interface ParsedCommand {
   command: string;
   args: string;
@@ -724,6 +754,17 @@ export async function handleAction(incoming: IncomingMessage, action: string): P
     return { text: `Couldn't reach the price store: ${(err as Error).message}` };
   }
 
+  // A spelling fix carries two names rather than a bill number, so it is
+  // decoded before the number-based actions.
+  const fix = decodeFix(action);
+  if (fix) {
+    try {
+      return await handleRename(businessId, `${fix.from} to ${fix.to}`);
+    } catch (err) {
+      return { text: `Something went wrong: ${(err as Error).message}` };
+    }
+  }
+
   const [verb, rawNo] = action.split(":");
   const billNo = rawNo && /^\d+$/.test(rawNo) ? Number(rawNo) : null;
 
@@ -758,7 +799,7 @@ async function runCommand(
       case "/help":
         return { text: HELP };
       case "/add":
-        return { text: await handleAdd(businessId, args) };
+        return await handleAdd(businessId, args);
       case "/prices":
       case "/list":
         return { text: await handlePrices(businessId) };

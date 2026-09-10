@@ -54,11 +54,19 @@ interface TelegramGetUpdatesResponse {
 // present the same actions as a numbered list or quick replies.
 function toInlineKeyboard(reply: Reply): unknown {
   if (!reply.actions || reply.actions.length === 0) return undefined;
-  return {
-    inline_keyboard: [
-      reply.actions.map((a) => ({ text: a.label, callback_data: a.action })),
-    ],
-  };
+
+  const buttons = reply.actions.map((a) => ({ text: a.label, callback_data: a.action }));
+
+  // Long labels ("panner -> paneer") get their own row; short ones sit
+  // three across. Everything on one row squeezes long labels until they
+  // are unreadable on a phone.
+  const perRow = buttons.some((b) => b.text.length > 16) ? 1 : 3;
+
+  const rows: (typeof buttons)[] = [];
+  for (let i = 0; i < buttons.length; i += perRow) {
+    rows.push(buttons.slice(i, i + perRow));
+  }
+  return { inline_keyboard: rows };
 }
 
 async function sendReply(chatId: number, reply: Reply): Promise<void> {
