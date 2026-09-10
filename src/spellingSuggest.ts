@@ -73,3 +73,32 @@ export function suggestSpelling(name: string): SpellingSuggestion | null {
   if (suggested === null) return null;
   return { typed: name, suggested };
 }
+
+
+// --- Near-duplicates inside the seller's OWN price list ------------------
+//
+// Adding "paneer" when "panner" is already saved leaves two products that
+// are the same thing. That is worse than untidy: catalog.ts refuses to
+// resolve a name that is equally close to two products, so a later order
+// for "paaner" becomes ambiguous and REFUSES TO BILL. The duplicate breaks
+// the thing the price list exists for.
+//
+// Detected against the seller's own list, so it works for items no
+// dictionary knows about ("zunka" vs "zunkaa").
+
+export interface DuplicateWarning {
+  added: string;
+  existing: string;
+  existingPrice: number;
+}
+
+export function findNearDuplicate(
+  name: string,
+  existing: { name: string; price: number }[],
+): DuplicateWarning | null {
+  const others = existing.filter((p) => p.name.toLowerCase() !== name.toLowerCase());
+  const match = suggestFromList(name, others.map((p) => p.name));
+  if (match === null) return null;
+  const found = others.find((p) => p.name === match)!;
+  return { added: name, existing: found.name, existingPrice: found.price };
+}

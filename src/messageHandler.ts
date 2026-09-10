@@ -2,7 +2,7 @@ import { routeParseOrder } from "./router.js";
 import { calculateBill } from "./calculator.js";
 import { formatBill } from "./formatter.js";
 import { getOrCreateBusinessForChannel, loadCatalog, upsertProduct, deactivateProduct, renameProduct } from "./catalogStore.js";
-import { suggestSpelling } from "./spellingSuggest.js";
+import { suggestSpelling, findNearDuplicate } from "./spellingSuggest.js";
 import {
   createBillSession,
   getCurrentDraft,
@@ -181,17 +181,25 @@ async function handleAdd(businessId: string, args: string): Promise<Reply> {
     };
   }
 
+  // Read the price list BEFORE saving, so a near-duplicate can be spotted
+  // against what was already there.
+  const before = await loadCatalog(businessId);
+
   const saved: string[] = [];
   for (const entry of entries) {
     await upsertProduct(businessId, entry.name, entry.price);
     saved.push(`${entry.name} \u2014 ${formatRupees(entry.price)}`);
   }
 
+  const duplicates = entries
+    .map((e) => findNearDuplicate(e.name, before.products))
+    .filter((x): x is NonNullable<typeof x> => x !== null);
+
   // Flag likely misspellings, but SAVE WHAT WAS TYPED. The name goes on
   // every bill the customer sees, so a typo here is permanent and worth
   // catching — but it is the seller's menu, and a shop genuinely called
   // "Panner Corner" must not be overruled by a spellchecker.
-  const suggestions = entries
+  const allSuggestions = entries
     .map((e) => suggestSpelling(e.name))
     .filter((x): x is NonNullable<typeof x> => x !== null);
 
@@ -200,6 +208,31 @@ async function handleAdd(businessId: string, args: string): Promise<Reply> {
     parts.push(`Saved ${saved.length} item(s):\n${saved.map((s) => `  ${s}`).join("\n")}`);
   }
   const actions: ReplyAction[] = [];
+
+  // A duplicate in the seller's OWN list matters more than a dictionary
+  // suggestion, and the two would otherwise both fire on the same item.
+  const duplicateNames = new Set(duplicates.map((d) => d.added.toLowerCase()));
+
+  for (const d of duplicates) {
+    const action = encodeMerge(d.existing);
+    parts.push(
+      `You already have "${d.existing}" at ${formatRupees(d.existingPrice)}, ` +
+        `which looks like the same thing as "${d.added}".\n\n` +
+        `If they are different items, keep both. If not, two names means ` +
+        `your sales get split across them, and a misspelled order ` +
+        `("${d.added.slice(0, 3)}...") can't be priced \u2014 I won't guess ` +
+        `which one you meant.` +
+        (action
+          ? `\nTap to drop "${d.existing}" and keep "${d.added}" at ${formatRupees(entries.find((e) => e.name === d.added)!.price)}.`
+          : `\n\nTo drop the old one:  /remove ${d.existing}`),
+    );
+    if (action) {
+      actions.push({ label: `\u{1f500} Keep only "${d.added}"`, action });
+    }
+  }
+
+  const suggestions = allSuggestions.filter((x) => !duplicateNames.has(x.typed.toLowerCase()));
+
   if (suggestions.length > 0) {
     const lines = suggestions.map((x) => `  "${x.typed}" \u2192 "${x.suggested}"?`);
     const fixable = suggestions.filter((x) => encodeFix(x.typed, x.suggested) !== null);
@@ -591,6 +624,18 @@ export function decodeFix(action: string): { from: string; to: string } | null {
   return { from, to };
 }
 
+// Merging drops the older duplicate and keeps what the seller just typed.
+export function encodeMerge(drop: string): string | null {
+  const action = `merge:${drop}`;
+  return Buffer.byteLength(action, "utf8") <= 64 ? action : null;
+}
+
+export function decodeMerge(action: string): string | null {
+  if (!action.startsWith("merge:")) return null;
+  const name = action.slice(6);
+  return name.length > 0 ? name : null;
+}
+
 export interface ParsedCommand {
   command: string;
   args: string;
@@ -756,6 +801,20 @@ export async function handleAction(incoming: IncomingMessage, action: string): P
 
   // A spelling fix carries two names rather than a bill number, so it is
   // decoded before the number-based actions.
+  const drop = decodeMerge(action);
+  if (drop) {
+    try {
+      const removed = await deactivateProduct(businessId, drop);
+      return {
+        text: removed
+          ? `Dropped "${drop}". Past bills that used it keep the name and price they were made with.`
+          : `"${drop}" isn't in your price list any more.`,
+      };
+    } catch (err) {
+      return { text: `Something went wrong: ${(err as Error).message}` };
+    }
+  }
+
   const fix = decodeFix(action);
   if (fix) {
     try {

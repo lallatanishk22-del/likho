@@ -118,3 +118,56 @@ test("a non-fix action is not decoded as one", () => {
 test("a malformed fix action is rejected", () => {
   assert.equal(decodeFix("fix:paneer"), null);
 });
+
+// --- Near-duplicates in the seller's own price list --------------------
+// Adding "paneer" when "panner" is already saved leaves two products that
+// are the same thing. Worse than untidy: catalog.ts refuses a name equally
+// close to two products, so a later order stops billing entirely.
+
+import { findNearDuplicate } from "../src/spellingSuggest.js";
+import { encodeMerge, decodeMerge } from "../src/messageHandler.js";
+
+const list = (...items: [string, number][]) =>
+  items.map(([name, price]) => ({ name, price }));
+
+test("adding 'paneer' spots the existing 'panner'", () => {
+  const dup = findNearDuplicate("paneer", list(["panner", 200], ["chai", 15]));
+  assert.deepEqual(dup, { added: "paneer", existing: "panner", existingPrice: 200 });
+});
+
+test("works for items no dictionary knows", () => {
+  // "zunka" is a real dish that is not in CANONICAL_ITEMS — detection here
+  // is against the seller's OWN list, so it still works.
+  const dup = findNearDuplicate("zunkaa", list(["zunka", 90]));
+  assert.equal(dup?.existing, "zunka");
+});
+
+test("re-adding the same item is not a duplicate", () => {
+  // Changing a price is a normal upsert, not a near-duplicate.
+  assert.equal(findNearDuplicate("paneer", list(["paneer", 200])), null);
+});
+
+test("a genuinely different item is not a duplicate", () => {
+  assert.equal(findNearDuplicate("biryani", list(["paneer", 200], ["chai", 15])), null);
+});
+
+test("two short names are never called duplicates", () => {
+  assert.equal(findNearDuplicate("pav", list(["pav bhaji", 80])), null);
+});
+
+test("an empty list has no duplicates", () => {
+  assert.equal(findNearDuplicate("paneer", []), null);
+});
+
+test("a merge action round-trips", () => {
+  assert.equal(decodeMerge(encodeMerge("panner")!), "panner");
+});
+
+test("a merge action is not confused with a fix action", () => {
+  assert.equal(decodeMerge("fix:ab"), null);
+  assert.equal(decodeMerge("confirm:1042"), null);
+});
+
+test("a name too long for a button returns null rather than truncating", () => {
+  assert.equal(encodeMerge("a".repeat(70)), null);
+});
