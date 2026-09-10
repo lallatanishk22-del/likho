@@ -12,6 +12,11 @@ Rules:
 - "unitPrice" MUST be null unless a price for that item is explicitly stated in this message. A missing price is NOT a reason to ask for clarification — the billing system looks up unstated prices in the seller's own price list afterwards. Simply report null.
 - Every item MUST still have an explicit quantity. If a quantity is missing or a number could plausibly belong to more than one item, set "status" to "clarification" and ask one specific question in "clarification".
 - A customer name is OPTIONAL. Never set status to "clarification" just because no customer name was given.
+- The customer name may appear ANYWHERE: before the items ("Ravi 2 chai"), after them ("2 chai Ravi"), on its own line, or after a linking word ("for Ravi", "Ravi ka bill"). Look through the WHOLE message for it, not just the beginning.
+- The name may be one word ("Ravi") or several ("Ria Bhanushali").
+- Any word that is not a product, a quantity, a price, or an ordering word is most likely the customer name.
+- Never treat a product name, quantity, price, or a word like "bill"/"order"/"for"/"ka" as the customer.
+- If no person is named at all, "customer" MUST be null. Never invent one.
 - Only set "discountPercent" if a discount is explicitly stated in the message (e.g. a percentage). Otherwise it must be null.
 - If "status" is "clarification": "items" must be an empty array, "discountPercent" must be null, and "clarification" must be a non-empty question.
 - If "status" is "valid": "clarification" must be null.`;

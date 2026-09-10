@@ -61,3 +61,37 @@ test("a word merely containing a command name is NOT split", () => {
   assert.equal(parsed.length, 1);
   assert.equal(parsed[0]!.args, "2 addon rolls");
 });
+
+// --- Text before the command belongs to the command --------------------
+// "ria bhanushali /zbill 3 mudpie" produced a bill with no customer: the
+// prefix was discarded before the order ever reached the parser.
+
+test("a customer name written before the command is kept", () => {
+  const parsed = splitCommands("ria bhanushali /zbill 3 mudpie");
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0]!.command, "/zbill");
+  assert.equal(parsed[0]!.args, "ria bhanushali 3 mudpie");
+});
+
+test("the prefix attaches to the FIRST command only", () => {
+  const parsed = splitCommands("ravi /zbill 2 chai /plus 1 lassi");
+  assert.equal(parsed.length, 2);
+  assert.equal(parsed[0]!.args, "ravi 2 chai");
+  assert.equal(parsed[1]!.args, "1 lassi");
+});
+
+test("a command with nothing before it is unchanged", () => {
+  const parsed = splitCommands("/zbill 3 mudpie");
+  assert.equal(parsed[0]!.args, "3 mudpie");
+});
+
+test("a prefix on a command that takes no arguments does no harm", () => {
+  const parsed = splitCommands("thanks /sales");
+  assert.equal(parsed[0]!.command, "/sales");
+  assert.equal(parsed[0]!.args, "thanks");
+});
+
+test("a multi-line prefix is kept", () => {
+  const parsed = splitCommands("ria bhanushali\n/zbill 3 mudpie");
+  assert.equal(parsed[0]!.args, "ria bhanushali 3 mudpie");
+});

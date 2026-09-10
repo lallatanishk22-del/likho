@@ -546,14 +546,22 @@ export function splitCommands(text: string): ParsedCommand[] {
 
   hits.sort((a, b) => a.index - b.index);
 
+  // Text BEFORE the first command belongs to that command. It used to be
+  // discarded, which silently dropped the customer from
+  // "ria bhanushali /zbill 3 mudpie" — the bill came out with no name and
+  // nothing indicated why. People put the command where it falls in the
+  // sentence; the parser has to read the whole sentence.
+  const prefix = trimmed.slice(0, hits[0]!.index).trim();
+
   const parsed: ParsedCommand[] = [];
   for (let i = 0; i < hits.length; i++) {
     const hit = hits[i]!;
     const argsStart = hit.index + hit.command.length;
     const argsEnd = i + 1 < hits.length ? hits[i + 1]!.index : trimmed.length;
+    const args = trimmed.slice(argsStart, argsEnd).trim();
     parsed.push({
       command: hit.command.toLowerCase(),
-      args: trimmed.slice(argsStart, argsEnd).trim(),
+      args: i === 0 && prefix.length > 0 ? `${prefix} ${args}`.trim() : args,
     });
   }
   return parsed;

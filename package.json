@@ -14,7 +14,8 @@
     "eval:routed": "npm run build && node dist/eval/runRouted.js",
     "exp:baseline": "npm run build && node dist/eval/experiments/runBaseline.js",
     "exp:4": "npm run build && node dist/eval/experiments/runExp4.js",
-    "exp:5": "npm run build && node dist/eval/experiments/runExp5.js"
+    "exp:5": "npm run build && node dist/eval/experiments/runExp5.js",
+    "eval:names": "npm run build && node --env-file-if-exists=.env dist/eval/nameExtraction.js"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
