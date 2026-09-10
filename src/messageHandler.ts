@@ -13,11 +13,13 @@ import {
   recordPayment,
   setItemQuantity,
   getOpenBills,
+  getSales,
   type StoredBill,
 } from "./billStore.js";
 import { buildCatalogIndex, findProduct } from "./catalog.js";
 import { classifyIntent } from "./intent.js";
 import { parsePriceList } from "./priceList.js";
+import { formatBusinessDateTime, parseDateRange } from "./businessDay.js";
 
 // Platform-independent command routing. Telegram polling (telegramBot.ts)
 // and the HTTP API used by n8n (apiServer.ts) both call handleIncoming(),
@@ -107,8 +109,14 @@ function renderStoredBill(stored: StoredBill): string {
         ? `Partly paid \u2014 ${formatRupees(Number(session.amount_paid))} of ${formatRupees(Number(session.total))}`
         : "Pending";
 
+  // Every bill carries its own date and time, in the business's timezone.
+  // A bill without one is a message, not a record — and once several exist
+  // in a chat, "which day was this?" has no answer without it.
+  const stamp = formatBusinessDateTime(new Date(session.finalized_at ?? session.created_at));
+
   return [
     `\u{1f9fe} ${who}Bill #${session.bill_no}`,
+    stamp,
     "",
     ...rows.map(line),
     "\u2500".repeat(width + 8),
@@ -389,14 +397,23 @@ async function handleDone(businessId: string): Promise<Reply> {
 // bills was technically true and practically misleading: a seller who had
 // made a dozen bills saw a total covering two of them, with no indication
 // the rest existed or how to find them.
-async function handleSales(businessId: string): Promise<Reply> {
-  const s = await getTodaysSales(businessId);
+async function handleSales(businessId: string, text: string): Promise<Reply> {
+  // "sales", "yesterday sales", "sales 8 sep", "this month" — the period
+  // comes from the seller's own words; no period means today.
+  const range = parseDateRange(text);
+  const label = range?.label ?? "Today";
+  const s = await getSales(businessId, range ?? undefined);
 
   if (s.count === 0 && s.openCount === 0) {
-    return { text: "Nothing billed today yet." };
+    // "today"/"yesterday" read as adverbs; a named period needs "on".
+    const when =
+      label === "Today" || label === "Yesterday"
+        ? label.toLowerCase()
+        : `in ${label.toLowerCase()}`.replace("in last 7 days", "in the last 7 days");
+    return { text: `Nothing billed ${when}.` };
   }
 
-  const lines = ["Today"];
+  const lines = [label];
 
   if (s.count > 0) {
     lines.push("", `${s.count} confirmed \u2014 ${formatRupees(s.total)}`);
@@ -428,7 +445,8 @@ async function handleOpenBills(businessId: string): Promise<Reply> {
   }
   const lines = open.map(
     (b) =>
-      `#${b.bill_no}  ${b.customer_ref ? titleCase(b.customer_ref) : "no name"}  ${formatRupees(Number(b.total))}`,
+      `#${b.bill_no}  ${b.customer_ref ? titleCase(b.customer_ref) : "no name"}  ` +
+      `${formatRupees(Number(b.total))}  \u00b7  ${formatBusinessDateTime(new Date(b.created_at))}`,
   );
   return {
     text:
@@ -602,7 +620,7 @@ async function runIntent(
       case "prices":
         return { text: await handlePrices(businessId) };
       case "sales":
-        return await handleSales(businessId);
+        return await handleSales(businessId, text);
       case "open_bills":
         return await handleOpenBills(businessId);
       case "show_bill": {
@@ -718,7 +736,7 @@ async function runCommand(
       case "/paid":
         return await handlePayment(businessId, null, null);
       case "/sales":
-        return await handleSales(businessId);
+        return await handleSales(businessId, args.length > 0 ? args : trimmed);
       case "/open":
         return await handleOpenBills(businessId);
       default:

@@ -124,10 +124,11 @@ export function classifyIntent(rawText: string): Intent {
     return { ...base, name: "open_bills" };
   }
 
-  if (hasWord(lower, "sales", "total today", "today's", "kitna", "kamaya")) {
-    if (!/\d/.test(lower) || hasWord(lower, "sales")) {
-      return { ...base, name: "sales" };
-    }
+  // "sales", "yesterday sales", "sales 8 sep", "this month ka total".
+  // The digit guard is relaxed when "sales" is present so a date in the
+  // question ("sales 8 sep") does not make it look like an order.
+  if (hasWord(lower, "sales", "kamaya", "kitna") || /\b(today|yesterday|this month|last month|this week)('?s)?\s+(sales|total|business)\b/.test(lower)) {
+    return { ...base, name: "sales" };
   }
 
   if (hasWord(lower, "prices", "price list", "rate", "rates", "menu")) {

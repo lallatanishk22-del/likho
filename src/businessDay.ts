@@ -56,3 +56,139 @@ export function isSameBusinessDay(
 ): boolean {
   return at.getTime() >= startOfBusinessDay(now, tz).getTime();
 }
+
+// --- Display -------------------------------------------------------------
+// Every timestamp shown to a seller is rendered in the BUSINESS's timezone,
+// never the server's. A bill that says "10 Sep, 9:03 am" must mean 9:03am
+// where the shop is, regardless of where this process runs.
+
+export function formatBusinessDateTime(at: Date, tz: string = BUSINESS_TIMEZONE): string {
+  return new Intl.DateTimeFormat("en-IN", {
+    timeZone: tz,
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  }).format(at);
+}
+
+export function formatBusinessDate(at: Date, tz: string = BUSINESS_TIMEZONE): string {
+  return new Intl.DateTimeFormat("en-IN", {
+    timeZone: tz,
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  }).format(at);
+}
+
+// --- Date ranges for reporting ------------------------------------------
+
+export interface DateRange {
+  label: string;
+  from: Date;
+  // Exclusive upper bound.
+  to: Date;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+const MONTHS = [
+  "jan", "feb", "mar", "apr", "may", "jun",
+  "jul", "aug", "sep", "oct", "nov", "dec",
+];
+
+function addDays(start: Date, days: number, tz: string): Date {
+  // Re-derives the day boundary after shifting, so a DST transition inside
+  // the range cannot slide the window by an hour.
+  return startOfBusinessDay(new Date(start.getTime() + days * DAY_MS + DAY_MS / 2), tz);
+}
+
+function dayRange(start: Date, label: string, tz: string): DateRange {
+  return { label, from: start, to: addDays(start, 1, tz) };
+}
+
+// Reads the reporting period out of a seller's own words. Returns null when
+// no period is mentioned, so the caller can default to today.
+export function parseDateRange(
+  text: string,
+  now: Date = new Date(),
+  tz: string = BUSINESS_TIMEZONE,
+): DateRange | null {
+  const lower = text.toLowerCase();
+  const todayStart = startOfBusinessDay(now, tz);
+
+  if (/\b(yesterday|kal\b)/.test(lower)) {
+    return dayRange(addDays(todayStart, -1, tz), "Yesterday", tz);
+  }
+  if (/\b(today|aaj)\b/.test(lower)) {
+    return dayRange(todayStart, "Today", tz);
+  }
+  if (/\b(this|is)\s+(week|hafte|hafta)\b/.test(lower) || /\blast\s+7\s+days\b/.test(lower)) {
+    return { label: "Last 7 days", from: addDays(todayStart, -6, tz), to: addDays(todayStart, 1, tz) };
+  }
+  if (/\b(this|is)\s+(month|mahine|mahina)\b/.test(lower)) {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit",
+    }).format(now).split("-");
+    const dayOfMonth = Number(parts[2]);
+    return {
+      label: "This month",
+      from: addDays(todayStart, -(dayOfMonth - 1), tz),
+      to: addDays(todayStart, 1, tz),
+    };
+  }
+  if (/\blast\s+month\b/.test(lower)) {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit",
+    }).format(now).split("-");
+    const dayOfMonth = Number(parts[2]);
+    const firstOfThisMonth = addDays(todayStart, -(dayOfMonth - 1), tz);
+    // Step back one day to land inside the previous month, then to its first.
+    const lastOfPrev = addDays(firstOfThisMonth, -1, tz);
+    const prevParts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit",
+    }).format(lastOfPrev).split("-");
+    const firstOfPrev = addDays(lastOfPrev, -(Number(prevParts[2]) - 1), tz);
+    return { label: "Last month", from: firstOfPrev, to: firstOfThisMonth };
+  }
+
+  // An explicit day: "8 sep", "sep 8", "8/9", "8-9-2026".
+  const explicit =
+    lower.match(/\b(\d{1,2})\s*(?:st|nd|rd|th)?\s+([a-z]{3,})\b/) ??
+    lower.match(/\b([a-z]{3,})\s+(\d{1,2})\s*(?:st|nd|rd|th)?\b/);
+  if (explicit) {
+    const a = explicit[1]!;
+    const b = explicit[2]!;
+    const dayStr = /^\d+$/.test(a) ? a : b;
+    const monthStr = /^\d+$/.test(a) ? b : a;
+    const month = MONTHS.indexOf(monthStr.slice(0, 3));
+    const day = Number(dayStr);
+    if (month >= 0 && day >= 1 && day <= 31) {
+      const year = Number(
+        new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric" }).format(now),
+      );
+      const start = startOfBusinessDay(new Date(Date.UTC(year, month, day, 12)), tz);
+      // A date later in the year than today means the seller meant last year.
+      const resolved = start.getTime() > now.getTime() ? startOfBusinessDay(new Date(Date.UTC(year - 1, month, day, 12)), tz) : start;
+      return dayRange(resolved, formatBusinessDate(resolved, tz), tz);
+    }
+  }
+
+  const numeric = lower.match(/\b(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?\b/);
+  if (numeric) {
+    const day = Number(numeric[1]);
+    const month = Number(numeric[2]) - 1;
+    const rawYear = numeric[3] ? Number(numeric[3]) : null;
+    const year = rawYear === null
+      ? Number(new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric" }).format(now))
+      : rawYear < 100 ? 2000 + rawYear : rawYear;
+    if (month >= 0 && month <= 11 && day >= 1 && day <= 31) {
+      const start = startOfBusinessDay(new Date(Date.UTC(year, month, day, 12)), tz);
+      return dayRange(start, formatBusinessDate(start, tz), tz);
+    }
+  }
+
+  return null;
+}

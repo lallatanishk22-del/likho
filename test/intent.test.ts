@@ -173,3 +173,21 @@ test("'show open bills' still lists them, not one bill", () => {
 test("'sales' is still sales", () => {
   assert.equal(name("sales"), "sales");
 });
+
+// --- Sales for a period -------------------------------------------------
+
+test("'yesterday sales' asks for sales, not an order", () => {
+  assert.equal(name("yesterday sales"), "sales");
+});
+
+test("'sales 8 sep' is a sales question despite the digits", () => {
+  assert.equal(name("sales 8 sep"), "sales");
+});
+
+test("'this month sales' is a sales question", () => {
+  assert.equal(name("this month sales"), "sales");
+});
+
+test("a date in a sales question does not make it an order", () => {
+  assert.notEqual(name("sales 8/9"), "order");
+});

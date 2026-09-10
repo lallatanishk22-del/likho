@@ -1,7 +1,7 @@
 import type { Bill } from "./types.js";
 import type { ParsedOrder } from "./structuredOrder.js";
 import { rest } from "./catalogStore.js";
-import { startOfBusinessDay } from "./businessDay.js";
+import { startOfBusinessDay, type DateRange } from "./businessDay.js";
 
 // Persistence for BillSession — the durable, versioned state that turns a
 // one-shot reply into something the seller can come back to, edit, and
@@ -25,6 +25,8 @@ export interface BillSessionRow {
   discount_amount: string | number;
   total: string | number;
   last_checked_message_id: string | null;
+  created_at: string;
+  finalized_at: string | null;
   // Payment is only ever set by the seller's explicit confirmation, never
   // inferred from a customer's message.
   payment_status: "pending" | "partial" | "paid";
@@ -172,17 +174,24 @@ export interface DaySummary {
   openTotal: number;
 }
 
-export async function getTodaysSales(businessId: string): Promise<DaySummary> {
-  const since = startOfBusinessDay().toISOString();
+// Sales for any period. Defaults to today when no range is given, so the
+// bare "sales" question is unchanged.
+export async function getSales(
+  businessId: string,
+  range?: DateRange,
+): Promise<DaySummary> {
+  const from = (range?.from ?? startOfBusinessDay()).toISOString();
+  const toClause = range ? `&finalized_at=lt.${range.to.toISOString()}` : "";
+  const openToClause = range ? `&created_at=lt.${range.to.toISOString()}` : "";
 
   const confirmed = (await rest(
     `bill_sessions?business_id=eq.${businessId}&status=eq.finalized` +
-      `&finalized_at=gte.${since}&select=total,amount_paid,payment_status`,
+      `&finalized_at=gte.${from}${toClause}&select=total,amount_paid,payment_status`,
   )) as { total: string | number; amount_paid: string | number }[];
 
   const open = (await rest(
     `bill_sessions?business_id=eq.${businessId}&status=in.(draft,updated)` +
-      `&created_at=gte.${since}&select=total`,
+      `&created_at=gte.${from}${openToClause}&select=total`,
   )) as { total: string | number }[];
 
   const total = confirmed.reduce((sum, r) => sum + Number(r.total), 0);
@@ -196,6 +205,10 @@ export async function getTodaysSales(businessId: string): Promise<DaySummary> {
     openCount: open.length,
     openTotal: Math.round(open.reduce((sum, r) => sum + Number(r.total), 0) * 100) / 100,
   };
+}
+
+export async function getTodaysSales(businessId: string): Promise<DaySummary> {
+  return getSales(businessId);
 }
 
 // Bills started today and never confirmed, newest first — so "show open
