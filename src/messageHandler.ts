@@ -1,7 +1,8 @@
 import { routeParseOrder } from "./router.js";
 import { calculateBill } from "./calculator.js";
 import { formatBill } from "./formatter.js";
-import { getOrCreateBusinessForChannel, loadCatalog, upsertProduct, deactivateProduct } from "./catalogStore.js";
+import { getOrCreateBusinessForChannel, loadCatalog, upsertProduct, deactivateProduct, renameProduct } from "./catalogStore.js";
+import { suggestSpelling } from "./spellingSuggest.js";
 import {
   createBillSession,
   getCurrentDraft,
@@ -185,9 +186,27 @@ async function handleAdd(businessId: string, args: string): Promise<string> {
     saved.push(`${entry.name} \u2014 ${formatRupees(entry.price)}`);
   }
 
+  // Flag likely misspellings, but SAVE WHAT WAS TYPED. The name goes on
+  // every bill the customer sees, so a typo here is permanent and worth
+  // catching — but it is the seller's menu, and a shop genuinely called
+  // "Panner Corner" must not be overruled by a spellchecker.
+  const suggestions = entries
+    .map((e) => suggestSpelling(e.name))
+    .filter((x): x is NonNullable<typeof x> => x !== null);
+
   const parts: string[] = [];
   if (saved.length > 0) {
     parts.push(`Saved ${saved.length} item(s):\n${saved.map((s) => `  ${s}`).join("\n")}`);
+  }
+  if (suggestions.length > 0) {
+    const lines = suggestions.map((s) => `  "${s.typed}" \u2192 "${s.suggested}"?`);
+    parts.push(
+      `${suggestions.length === 1 ? "One name looks" : "Some names look"} like a spelling slip:\n` +
+        `${lines.join("\n")}\n\n` +
+        `This is what prints on the customer's bill. To change it:\n` +
+        `  rename ${suggestions[0]!.typed} to ${suggestions[0]!.suggested}\n` +
+        `Or ignore this if the spelling is deliberate.`,
+    );
   }
   if (unreadable.length > 0) {
     parts.push(
@@ -196,6 +215,34 @@ async function handleAdd(businessId: string, args: string): Promise<string> {
     );
   }
   return parts.join("\n\n");
+}
+
+// Renaming keeps the product's id, so bills that already used it stay
+// linked and their price snapshots are untouched. Only the name that
+// prints on FUTURE bills changes.
+async function handleRename(businessId: string, args: string): Promise<Reply> {
+  const match = args.match(/^(.+?)\s+(?:to|as|->|\u2192)\s+(.+)$/i);
+  if (!match) {
+    return { text: 'Use: rename panner to paneer' };
+  }
+  const from = match[1]!.trim();
+  const to = match[2]!.trim();
+  if (from.length === 0 || to.length === 0) {
+    return { text: 'Use: rename panner to paneer' };
+  }
+
+  const result = await renameProduct(businessId, from, to);
+  if (result === "not_found") {
+    return { text: `"${from}" isn't in your price list. Check /prices.` };
+  }
+  if (result === "target_exists") {
+    return {
+      text:
+        `You already have "${to}" in your price list.\n\n` +
+        `Remove one of them first:  /remove ${from}`,
+    };
+  }
+  return { text: `Renamed "${from}" to "${to}". Past bills keep the name they were made with.` };
 }
 
 async function handlePrices(businessId: string): Promise<string> {
@@ -511,7 +558,7 @@ const GREETING_REPLY =
 const KNOWN_COMMANDS = [
   "/start", "/help", "/add", "/prices", "/list", "/remove",
   "/zbill", "/plus", "/additem", "/minus", "/removeitem",
-  "/bill", "/done", "/sales", "/paid", "/open",
+  "/bill", "/done", "/sales", "/paid", "/open", "/rename",
 ];
 
 export interface ParsedCommand {
@@ -648,6 +695,8 @@ async function runIntent(
         return await handlePayment(businessId, intent.billNo, intent.amount);
       case "pdf":
         return { text: "PDF export isn't ready yet — the bill above is the record for now." };
+      case "rename":
+        return await handleRename(businessId, intent.text);
       case "add_item":
         // Same deterministic edit path "/plus" uses — no model involved,
         // because the seller is stating exactly what they want.
@@ -715,6 +764,8 @@ async function runCommand(
         return { text: await handlePrices(businessId) };
       case "/remove":
         return { text: await handleRemove(businessId, args) };
+      case "/rename":
+        return await handleRename(businessId, args);
       case "/zbill": {
         const replied = incoming.repliedText?.trim();
         const orderText = args.trim().length > 0 ? args.trim() : replied ?? "";

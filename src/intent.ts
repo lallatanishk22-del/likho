@@ -23,6 +23,7 @@ export type IntentName =
   | "payment"
   | "pdf"
   | "correction"
+  | "rename"
   | "add_item"
   | "remove_item"
   | "order";
@@ -98,6 +99,13 @@ export function classifyIntent(rawText: string): Intent {
     /\bnot\s+\d/i.test(lower)
   ) {
     return { ...base, name: "correction" };
+  }
+
+  // Renaming a product in the price list. Checked before the edit patterns
+  // below so "rename x to y" is never read as adding an item.
+  const renameMatch = text.match(/^rename\s+(.+)$/i);
+  if (renameMatch) {
+    return { ...base, name: "rename", text: renameMatch[1]!.trim() };
   }
 
   // --- Editing the open bill -------------------------------------------

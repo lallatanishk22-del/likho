@@ -1,3 +1,5 @@
+import { editDistance, distanceBudget, squeezeRepeats, normalizeName } from "./nearName.js";
+
 // Seller price store + deterministic price resolution.
 //
 // This is the layer that makes "2 paneer, 4 samosa" (no prices in the
@@ -39,73 +41,12 @@ export interface PriceCatalog {
   products: CatalogProduct[];
 }
 
-function normalizeName(name: string): string {
-  return name.toLowerCase().replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ").trim();
-}
-
 // "samosas" -> "samosa", "rotis" -> "roti". Only strips a trailing plural
 // "s"/"es"; does not attempt real morphology.
 function singularize(name: string): string {
   if (name.endsWith("es") && name.length > 3) return name.slice(0, -2);
   if (name.endsWith("s") && name.length > 2) return name.slice(0, -1);
   return name;
-}
-
-// Collapses runs of repeated letters: "lasssi" -> "lasi", "lassi" -> "lasi",
-// "daal" -> "dal", "rotti" -> "roti". Catches the single most common typo
-// class (a doubled or missed repeated letter) with no distance maths.
-function squeezeRepeats(name: string): string {
-  return name.replace(/(.)\1+/g, "$1");
-}
-
-// Damerau-Levenshtein (optimal string alignment), with an early bail-out
-// once every cell in a row exceeds the budget.
-//
-// Plain Levenshtein was wrong here: it scores a transposition as TWO edits,
-// so "smaosa" -> "samosa" cost 2 — the same as two unrelated substitutions.
-// Transposing adjacent letters is one of the most common ways a person
-// mistypes a word, so it is counted as the single slip it actually is.
-function editDistance(a: string, b: string, max: number): number {
-  if (Math.abs(a.length - b.length) > max) return max + 1;
-
-  const n = a.length;
-  const m = b.length;
-  let prev2: number[] = [];
-  let prev = Array.from({ length: m + 1 }, (_, i) => i);
-
-  for (let i = 1; i <= n; i++) {
-    const row = [i];
-    let rowMin = i;
-    for (let j = 1; j <= m; j++) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      let value = Math.min(row[j - 1]! + 1, prev[j]! + 1, prev[j - 1]! + cost);
-      // Adjacent transposition: "ab" typed where "ba" was meant.
-      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
-        value = Math.min(value, prev2[j - 2]! + 1);
-      }
-      row.push(value);
-      if (value < rowMin) rowMin = value;
-    }
-    if (rowMin > max) return max + 1;
-    prev2 = prev;
-    prev = row;
-  }
-  return prev[m]!;
-}
-
-// How wrong a name is allowed to be, by its length.
-//
-// Tight on purpose. Counting a transposition as one edit already covers
-// most real typos, so the budget buys safety rather than recall:
-//   <= 3   no slack at all — at three letters, one substitution is the
-//          difference between two different products ("tea"/"sea")
-//   4-7    one slip
-//   >= 8   two, because a long name has more room for a genuine typo and
-//          far less chance of colliding with a different product
-function distanceBudget(length: number): number {
-  if (length <= 3) return 0;
-  if (length <= 7) return 1;
-  return 2;
 }
 
 function candidateKeys(name: string): string[] {

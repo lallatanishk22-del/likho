@@ -121,3 +121,33 @@ export async function deactivateProduct(businessId: string, name: string): Promi
   )) as unknown[];
   return Array.isArray(updated) && updated.length > 0;
 }
+
+// Renames a product, keeping its id — so every bill that already referenced
+// it stays linked, and the price snapshots on those bills are untouched.
+// Returns false when there is nothing by that name, or when the new name is
+// already taken by a different product.
+export async function renameProduct(
+  businessId: string,
+  from: string,
+  to: string,
+): Promise<"renamed" | "not_found" | "target_exists"> {
+  const oldName = from.toLowerCase().trim();
+  const newName = to.toLowerCase().trim();
+  if (oldName === newName) return "renamed";
+
+  const existing = (await rest(
+    `products?business_id=eq.${businessId}&name=eq.${encodeURIComponent(newName)}` +
+      `&active=eq.true&select=id`,
+  )) as { id: string }[];
+  if (existing.length > 0) return "target_exists";
+
+  const updated = (await rest(
+    `products?business_id=eq.${businessId}&name=eq.${encodeURIComponent(oldName)}&active=eq.true`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ name: newName, updated_at: new Date().toISOString() }),
+    },
+  )) as { id: string }[];
+
+  return updated.length > 0 ? "renamed" : "not_found";
+}
