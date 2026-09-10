@@ -164,9 +164,17 @@ Then talk to me normally:
 
 Buttons on each bill do the same thing.`;
 
-// Saves prices in whatever shape the seller typed them — see priceList.ts.
+// Saves prices in whatever shape the seller typed them - see priceList.ts.
 // Partial success is deliberate: an unreadable fragment must never discard
 // the items that WERE understood.
+//
+// Each entry is one of three things, and they are NOT the same:
+//   new           - save it
+//   same price    - nothing to do, say so
+//   price change  - ASK. Changing a saved price changes what every future
+//                   bill charges, and it happened silently before: typing
+//                   "/add paneer 100" when paneer was 200 quietly halved
+//                   the price with a reply that read like a fresh save.
 async function handleAdd(businessId: string, args: string): Promise<Reply> {
   const { entries, unreadable } = parsePriceList(args);
 
@@ -181,36 +189,76 @@ async function handleAdd(businessId: string, args: string): Promise<Reply> {
     };
   }
 
-  // Read the price list BEFORE saving, so a near-duplicate can be spotted
-  // against what was already there.
+  // Read the price list BEFORE saving, so both a price change and a
+  // near-duplicate can be judged against what was already there.
   const before = await loadCatalog(businessId);
+  const existingByName = new Map(
+    before.products.map((p) => [p.name.toLowerCase(), p] as const),
+  );
 
-  const saved: string[] = [];
+  const created: typeof entries = [];
+  const unchanged: typeof entries = [];
+  const priceChanges: { name: string; from: number; to: number }[] = [];
+
   for (const entry of entries) {
-    await upsertProduct(businessId, entry.name, entry.price);
-    saved.push(`${entry.name} \u2014 ${formatRupees(entry.price)}`);
+    const existing = existingByName.get(entry.name.toLowerCase());
+    if (!existing) {
+      created.push(entry);
+    } else if (existing.price === entry.price) {
+      unchanged.push(entry);
+    } else {
+      priceChanges.push({ name: existing.name, from: existing.price, to: entry.price });
+    }
   }
 
-  const duplicates = entries
-    .map((e) => findNearDuplicate(e.name, before.products))
-    .filter((x): x is NonNullable<typeof x> => x !== null);
-
-  // Flag likely misspellings, but SAVE WHAT WAS TYPED. The name goes on
-  // every bill the customer sees, so a typo here is permanent and worth
-  // catching — but it is the seller's menu, and a shop genuinely called
-  // "Panner Corner" must not be overruled by a spellchecker.
-  const allSuggestions = entries
-    .map((e) => suggestSpelling(e.name))
-    .filter((x): x is NonNullable<typeof x> => x !== null);
+  // Only genuinely new items are written now. A price change waits for a tap.
+  for (const entry of created) {
+    await upsertProduct(businessId, entry.name, entry.price);
+  }
 
   const parts: string[] = [];
-  if (saved.length > 0) {
-    parts.push(`Saved ${saved.length} item(s):\n${saved.map((s) => `  ${s}`).join("\n")}`);
-  }
   const actions: ReplyAction[] = [];
+
+  if (created.length > 0) {
+    parts.push(
+      `Saved ${created.length} item(s):\n` +
+        created.map((e) => `  ${e.name} — ${formatRupees(e.price)}`).join("\n"),
+    );
+  }
+
+  if (unchanged.length > 0) {
+    parts.push(
+      `Already at that price, nothing changed:\n` +
+        unchanged.map((e) => `  ${e.name} — ${formatRupees(e.price)}`).join("\n"),
+    );
+  }
+
+  // Price changes come first in the actions list: it is the only prompt
+  // here that is still waiting on the seller before anything is saved.
+  for (const change of priceChanges) {
+    const action = encodePriceChange(change.name, change.to);
+    const direction = change.to > change.from ? "up" : "down";
+    parts.push(
+      `"${change.name}" is already ${formatRupees(change.from)}.\n\n` +
+        `Change it ${direction} to ${formatRupees(change.to)}? This is what every ` +
+        `future bill will charge. Bills already made keep ${formatRupees(change.from)}.` +
+        (action ? "" : `\n\nTo change it:  /add ${change.name} ${change.to}`),
+    );
+    if (action) {
+      actions.push({
+        label: `\u{1f4b0} ${change.name}: ${formatRupees(change.from)} → ${formatRupees(change.to)}`,
+        action,
+      });
+    }
+  }
 
   // A duplicate in the seller's OWN list matters more than a dictionary
   // suggestion, and the two would otherwise both fire on the same item.
+  // Only newly created names can be duplicates - a price change is by
+  // definition an item that already exists under that exact name.
+  const duplicates = created
+    .map((e) => findNearDuplicate(e.name, before.products))
+    .filter((x): x is NonNullable<typeof x> => x !== null);
   const duplicateNames = new Set(duplicates.map((d) => d.added.toLowerCase()));
 
   for (const d of duplicates) {
@@ -219,11 +267,10 @@ async function handleAdd(businessId: string, args: string): Promise<Reply> {
       `You already have "${d.existing}" at ${formatRupees(d.existingPrice)}, ` +
         `which looks like the same thing as "${d.added}".\n\n` +
         `If they are different items, keep both. If not, two names means ` +
-        `your sales get split across them, and a misspelled order ` +
-        `("${d.added.slice(0, 3)}...") can't be priced \u2014 I won't guess ` +
-        `which one you meant.` +
+        `your sales get split across them, and a misspelled order can't be ` +
+        `priced — I won't guess which one you meant.` +
         (action
-          ? `\nTap to drop "${d.existing}" and keep "${d.added}" at ${formatRupees(entries.find((e) => e.name === d.added)!.price)}.`
+          ? `\nTap to drop "${d.existing}" and keep "${d.added}".`
           : `\n\nTo drop the old one:  /remove ${d.existing}`),
     );
     if (action) {
@@ -231,34 +278,40 @@ async function handleAdd(businessId: string, args: string): Promise<Reply> {
     }
   }
 
-  const suggestions = allSuggestions.filter((x) => !duplicateNames.has(x.typed.toLowerCase()));
+  // Flag likely misspellings, but SAVE WHAT WAS TYPED. The name goes on
+  // every bill the customer sees, so a typo here is permanent and worth
+  // catching - but it is the seller's menu, and a shop genuinely called
+  // "Panner Corner" must not be overruled by a spellchecker.
+  const suggestions = created
+    .map((e) => suggestSpelling(e.name))
+    .filter((x): x is NonNullable<typeof x> => x !== null)
+    .filter((x) => !duplicateNames.has(x.typed.toLowerCase()));
 
   if (suggestions.length > 0) {
-    const lines = suggestions.map((x) => `  "${x.typed}" \u2192 "${x.suggested}"?`);
     const fixable = suggestions.filter((x) => encodeFix(x.typed, x.suggested) !== null);
-
     parts.push(
       `${suggestions.length === 1 ? "One name looks" : "Some names look"} like a spelling slip:\n` +
-        `${lines.join("\n")}\n\n` +
-        `This is what prints on the customer's bill.` +
+        suggestions.map((x) => `  "${x.typed}" → "${x.suggested}"?`).join("\n") +
+        `\n\nThis is what prints on the customer's bill.` +
         (fixable.length === suggestions.length
           ? `\nTap to fix, or ignore it if the spelling is deliberate.`
           : `\n\nTo change one:  rename ${suggestions[0]!.typed} to ${suggestions[0]!.suggested}`),
     );
-
     for (const x of fixable) {
       actions.push({
-        label: `\u270f\ufe0f ${x.typed} \u2192 ${x.suggested}`,
+        label: `✏️ ${x.typed} → ${x.suggested}`,
         action: encodeFix(x.typed, x.suggested)!,
       });
     }
   }
+
   if (unreadable.length > 0) {
     parts.push(
       `I couldn't find a price for:\n${unreadable.map((f) => `  ${f}`).join("\n")}\n\n` +
         `Send it as "${unreadable[0]} 100" and I'll save it.`,
     );
   }
+
   return { text: parts.join("\n\n"), actions: actions.length > 0 ? actions : undefined };
 }
 
@@ -624,6 +677,23 @@ export function decodeFix(action: string): { from: string; to: string } | null {
   return { from, to };
 }
 
+// A confirmed price change. The price rides in the action rather than
+// being looked up again, so what the seller taps is exactly what they were
+// shown - a second /add in between cannot change it underneath them.
+export function encodePriceChange(name: string, price: number): string | null {
+  const action = `price:${name}${FIX_SEPARATOR}${price}`;
+  return Buffer.byteLength(action, "utf8") <= 64 ? action : null;
+}
+
+export function decodePriceChange(action: string): { name: string; price: number } | null {
+  if (!action.startsWith("price:")) return null;
+  const [name, rawPrice] = action.slice(6).split(FIX_SEPARATOR);
+  if (!name || rawPrice === undefined) return null;
+  const price = Number(rawPrice);
+  if (!Number.isFinite(price) || price < 0) return null;
+  return { name, price };
+}
+
 // Merging drops the older duplicate and keeps what the seller just typed.
 export function encodeMerge(drop: string): string | null {
   const action = `merge:${drop}`;
@@ -801,6 +871,20 @@ export async function handleAction(incoming: IncomingMessage, action: string): P
 
   // A spelling fix carries two names rather than a bill number, so it is
   // decoded before the number-based actions.
+  const priceChange = decodePriceChange(action);
+  if (priceChange) {
+    try {
+      await upsertProduct(businessId, priceChange.name, priceChange.price);
+      return {
+        text:
+          `"${priceChange.name}" is now ${formatRupees(priceChange.price)}.\n` +
+          `Bills already made keep the price they were made with.`,
+      };
+    } catch (err) {
+      return { text: `Something went wrong: ${(err as Error).message}` };
+    }
+  }
+
   const drop = decodeMerge(action);
   if (drop) {
     try {
