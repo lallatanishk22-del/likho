@@ -25,6 +25,12 @@ import { buildCatalogIndex, findProduct, CatalogResolutionError } from "./catalo
 import { classifyIntent } from "./intent.js";
 import { parsePriceList } from "./priceList.js";
 import { formatBusinessDateTime, parseDateRange } from "./businessDay.js";
+import { loadBusinessProfile, setBillTemplate, setBusinessField, isEditableField, EDITABLE_FIELDS } from "./businessProfile.js";
+import { toBillData } from "./billRender.js";
+import { renderBill } from "./templates/index.js";
+import { htmlToPdf, PdfUnavailableError } from "./billPdf.js";
+import { TEMPLATE_IDS, TEMPLATE_LABELS, asTemplateId } from "./billData.js";
+import { renderPreviews, previewData } from "./billPreviews.js";
 
 // Platform-independent command routing. Telegram polling (telegramBot.ts)
 // and the HTTP API used by n8n (apiServer.ts) both call handleIncoming(),
@@ -44,9 +50,24 @@ export interface ReplyAction {
   action: string;
 }
 
+export interface ReplyPhoto {
+  path: string;
+  caption?: string;
+}
+
+export interface ReplyDocument {
+  path: string;
+  caption?: string;
+}
+
 export interface Reply {
   text: string;
   actions?: ReplyAction[];
+  // Images to send before the text — used by the template picker, so the
+  // seller compares actual bills rather than six words.
+  photos?: ReplyPhoto[];
+  // A file to send, e.g. a rendered bill PDF.
+  document?: ReplyDocument;
 }
 
 export interface IncomingMessage {
@@ -166,6 +187,11 @@ Then talk to me normally:
   #1042 paid               record payment
   sales                    today's total
   yesterday sales          any day, week or month
+
+Your bill's look:
+  bill format              see all 6 styles, pick one
+  shop phone 98200 41122   your details on the bill
+  shop gstin 27AAB...      add GST, UPI, address
 
 When a name could mean two things I ask once and remember your answer:
   what have you learned    see what you've taught me
@@ -380,6 +406,136 @@ async function handleForget(businessId: string, args: string): Promise<Reply> {
     text: removed
       ? `Forgotten. I'll ask again next time "${word}" comes up.`
       : `I haven't learned "${word}".`,
+  };
+}
+
+// --- Bill style ----------------------------------------------------------
+
+export function encodeTemplate(id: string): string {
+  return `tpl:${id}`;
+}
+export function decodeTemplate(action: string): string | null {
+  if (!action.startsWith("tpl:")) return null;
+  const id = action.slice(4);
+  return TEMPLATE_IDS.includes(id as never) ? id : null;
+}
+
+// Shows all six styles as ACTUAL RENDERED BILLS, using the seller's own
+// shop name and their own last order where one exists. Six names would ask
+// them to imagine six layouts; six pictures ask them to point at one.
+async function handleBillFormat(
+  businessId: string,
+  onSlowWork?: () => Promise<void>,
+): Promise<Reply> {
+  await onSlowWork?.();
+
+  const business = await loadBusinessProfile(businessId);
+  const lastBill = await getCurrentDraft(businessId);
+
+  let previews;
+  try {
+    previews = await renderPreviews(previewData(business, lastBill));
+  } catch (err) {
+    if (err instanceof PdfUnavailableError) {
+      // Without a browser the pictures cannot be made, but the CHOICE must
+      // still work — a seller should never be blocked from picking a style.
+      return {
+        text:
+          `Choose your bill style:\n\n` +
+          TEMPLATE_IDS.map(
+            (id) => `  ${TEMPLATE_LABELS[id].name} \u2014 ${TEMPLATE_LABELS[id].forWho}`,
+          ).join("\n") +
+          `\n\nCurrently: ${TEMPLATE_LABELS[asTemplateId(business.billTemplate)].name}`,
+        actions: TEMPLATE_IDS.map((id) => ({
+          label: TEMPLATE_LABELS[id].name,
+          action: encodeTemplate(id),
+        })),
+      };
+    }
+    throw err;
+  }
+
+  const current = asTemplateId(business.billTemplate);
+  return {
+    text:
+      `How do you want your bill to look?\n\n` +
+      previews
+        .map(
+          (p, i) =>
+            `${i + 1}. ${p.label}${p.id === current ? "  \u2713 using this" : ""}\n     ${p.forWho}`,
+        )
+        .join("\n") +
+      `\n\nTap one to use it.`,
+    photos: previews.map((p, i) => ({ path: p.pngPath, caption: `${i + 1}. ${p.label}` })),
+    actions: previews.map((p, i) => ({
+      label: `${i + 1}. ${p.label}${p.id === current ? " \u2713" : ""}`,
+      action: encodeTemplate(p.id),
+    })),
+  };
+}
+
+// Renders a stored bill through the chosen template and returns a PDF.
+// The bill already exists as a record; this only draws it.
+async function handleBillPdf(businessId: string, billNo: number | null): Promise<Reply> {
+  const bill = await resolveBill(businessId, billNo);
+  if (!bill) {
+    return { text: "No bill to export. Send me an order and I'll make one." };
+  }
+
+  const business = await loadBusinessProfile(businessId);
+  const data = toBillData(bill, business);
+  const html = renderBill(data, business.billTemplate);
+
+  try {
+    const path = await htmlToPdf(html, `bill-${bill.session.bill_no}`);
+    return {
+      text: "",
+      document: {
+        path,
+        caption: `Bill #${bill.session.bill_no} \u00b7 ${formatRupees(Number(bill.session.total))}`,
+      },
+    };
+  } catch (err) {
+    if (err instanceof PdfUnavailableError) {
+      return {
+        text:
+          "I can't make PDFs on this machine yet \u2014 no Chrome found.\n" +
+          "The bill above is still the record.",
+      };
+    }
+    throw err;
+  }
+}
+
+// Business details that appear at the top of every bill.
+async function handleBusinessInfo(businessId: string, args: string): Promise<Reply> {
+  const match = args.match(/^(\w+)\s*(?:=|:|\s)\s*([\s\S]*)$/);
+  const business = await loadBusinessProfile(businessId);
+
+  if (!match || !isEditableField(match[1]!)) {
+    const lines = [
+      `Name:     ${business.name}`,
+      `Phone:    ${business.phone ?? "\u2014"}`,
+      `Address:  ${business.address ?? "\u2014"}`,
+      `GSTIN:    ${business.gstin ?? "\u2014"}`,
+      `UPI:      ${business.upiId ?? "\u2014"}`,
+      `Note:     ${business.footerNote ?? "\u2014"}`,
+    ];
+    return {
+      text:
+        `This is what appears on your bills:\n\n${lines.join("\n")}\n\n` +
+        `Change any of them:\n  shop phone 98200 41122\n  shop gstin 27AABCS1429B1ZX\n\n` +
+        `Fields: ${EDITABLE_FIELDS.join(", ")}`,
+    };
+  }
+
+  await setBusinessField(businessId, match[1]!, match[2]!);
+  const updated = await loadBusinessProfile(businessId);
+  const shown =
+    match[2]!.trim().length > 0 ? match[2]!.trim() : "(cleared)";
+  return {
+    text: `Updated. ${match[1]!.toLowerCase()}: ${shown}\n\nIt'll show on your next bill. Say "bill format" to see it.`,
+    ...(updated ? {} : {}),
   };
 }
 
@@ -715,6 +871,7 @@ const KNOWN_COMMANDS = [
   "/start", "/help", "/add", "/prices", "/list", "/remove",
   "/zbill", "/plus", "/additem", "/minus", "/removeitem",
   "/bill", "/done", "/sales", "/paid", "/open", "/rename", "/learned", "/forget",
+  "/format", "/style", "/shop", "/pdf",
 ];
 
 // Telegram caps callback_data at 64 BYTES. A rename carries two arbitrary
@@ -911,6 +1068,12 @@ async function runIntent(
         return await handlePayment(businessId, intent.billNo, intent.amount);
       case "pdf":
         return { text: "PDF export isn't ready yet — the bill above is the record for now." };
+      case "bill_format":
+        return await handleBillFormat(businessId, incoming.onSlowWork);
+      case "business_info":
+        return await handleBusinessInfo(businessId, intent.text);
+      case "pdf":
+        return await handleBillPdf(businessId, intent.billNo);
       case "learned":
         return await handleLearned(businessId);
       case "forget":
@@ -950,6 +1113,19 @@ export async function handleAction(incoming: IncomingMessage, action: string): P
   // priced. The seller taught their own price list; the same question is
   // never asked again, because buildCatalogIndex treats an alias as an
   // exact key.
+  const templateId = decodeTemplate(action);
+  if (templateId) {
+    try {
+      await setBillTemplate(businessId, asTemplateId(templateId));
+      const label = TEMPLATE_LABELS[asTemplateId(templateId)];
+      return {
+        text: `Your bills now use the ${label.name} style.\n\nTap PDF on any bill to get it.`,
+      };
+    } catch (err) {
+      return { text: `Something went wrong: ${(err as Error).message}` };
+    }
+  }
+
   const meantId = decodeMeant(action);
   if (meantId) {
     try {
@@ -1019,7 +1195,7 @@ export async function handleAction(incoming: IncomingMessage, action: string): P
       case "paid":
         return await handlePayment(businessId, billNo, null);
       case "pdf":
-        return { text: "PDF export isn't ready yet — the bill above is the record for now." };
+        return await handleBillPdf(businessId, billNo);
       default:
         return { text: "That action isn't available." };
     }
@@ -1051,6 +1227,13 @@ async function runCommand(
         return { text: await handleRemove(businessId, args) };
       case "/rename":
         return await handleRename(businessId, args);
+      case "/format":
+      case "/style":
+        return await handleBillFormat(businessId, onSlowWork);
+      case "/shop":
+        return await handleBusinessInfo(businessId, args);
+      case "/pdf":
+        return await handleBillPdf(businessId, null);
       case "/learned":
         return await handleLearned(businessId);
       case "/forget":

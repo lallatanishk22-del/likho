@@ -24,6 +24,8 @@ export type IntentName =
   | "pdf"
   | "correction"
   | "rename"
+  | "bill_format"
+  | "business_info"
   | "learned"
   | "forget"
   | "add_item"
@@ -85,6 +87,20 @@ export function classifyIntent(rawText: string): Intent {
     const candidate = amountMatch ? Number(amountMatch[1]) : null;
     const amount = candidate !== null && candidate !== billNo ? candidate : null;
     return { ...base, name: "payment", amount };
+  }
+
+  // Choosing how a bill LOOKS. Checked before "pdf" so "bill format" is
+  // never read as a request to export the current bill.
+  if (
+    /\b(bill\s*)?(format|template|style|design|theme)s?\b/i.test(lower) ||
+    /\bhow\s+(my|the)\s+bills?\s+look/i.test(lower)
+  ) {
+    return { ...base, name: "bill_format" };
+  }
+
+  const shopMatch = text.match(/^(?:shop|business|my\s+shop|my\s+business)\s*(.*)$/i);
+  if (shopMatch) {
+    return { ...base, name: "business_info", text: shopMatch[1]!.trim() };
   }
 
   if (hasWord(lower, "pdf", "invoice", "print")) {

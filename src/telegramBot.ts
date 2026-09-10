@@ -1,4 +1,6 @@
 import { handleIncoming, handleAction, type Reply, type IncomingMessage } from "./messageHandler.js";
+import { promises as fs } from "node:fs";
+import path from "node:path";
 
 // Telegram transport only: receive updates, hand them to the shared
 // message handler, send the reply back. All command routing, billing and
@@ -69,8 +71,79 @@ function toInlineKeyboard(reply: Reply): unknown {
   return { inline_keyboard: rows };
 }
 
+// multipart upload, hand-rolled: Telegram wants a file, and adding a
+// form-data dependency for two endpoints is not worth it.
+async function sendFile(
+  method: "sendPhoto" | "sendDocument" | "sendMediaGroup",
+  chatId: number,
+  files: { field: string; filePath: string }[],
+  fields: Record<string, string>,
+): Promise<void> {
+  if (!API_BASE) return;
+  const form = new FormData();
+  form.append("chat_id", String(chatId));
+  for (const [key, value] of Object.entries(fields)) form.append(key, value);
+  for (const file of files) {
+    const bytes = await fs.readFile(file.filePath);
+    form.append(file.field, new Blob([bytes]), path.basename(file.filePath));
+  }
+
+  const response = await fetch(`${API_BASE}/${method}`, { method: "POST", body: form });
+  if (!response.ok) {
+    throw new Error(`${method} failed (${response.status}): ${await response.text()}`);
+  }
+}
+
+// Photos go first so the seller sees the bills before the question about
+// them, then the text carries the buttons.
+async function sendPhotos(chatId: number, photos: NonNullable<Reply["photos"]>): Promise<void> {
+  if (photos.length === 0) return;
+
+  if (photos.length === 1) {
+    await sendFile("sendPhoto", chatId, [{ field: "photo", filePath: photos[0]!.path }],
+      photos[0]!.caption ? { caption: photos[0]!.caption } : {});
+    return;
+  }
+
+  // An album keeps six previews as one swipeable block instead of six
+  // separate messages the seller has to scroll past. Telegram caps a media
+  // group at 10.
+  for (let start = 0; start < photos.length; start += 10) {
+    const batch = photos.slice(start, start + 10);
+    const media = batch.map((photo, i) => ({
+      type: "photo",
+      media: `attach://p${i}`,
+      ...(photo.caption ? { caption: photo.caption } : {}),
+    }));
+    await sendFile(
+      "sendMediaGroup",
+      chatId,
+      batch.map((photo, i) => ({ field: `p${i}`, filePath: photo.path })),
+      { media: JSON.stringify(media) },
+    );
+  }
+}
+
 async function sendReply(chatId: number, reply: Reply): Promise<void> {
   if (!API_BASE) return;
+
+  if (reply.photos?.length) {
+    // A failed preview must not swallow the reply that carries the buttons.
+    try {
+      await sendPhotos(chatId, reply.photos);
+    } catch (err) {
+      console.error("[telegram] preview upload failed:", (err as Error).message);
+    }
+  }
+
+  if (reply.document) {
+    await sendFile("sendDocument", chatId, [{ field: "document", filePath: reply.document.path }],
+      reply.document.caption ? { caption: reply.document.caption } : {});
+    if (reply.text.trim().length === 0) return;
+  }
+
+  if (reply.text.trim().length === 0 && !reply.actions?.length) return;
+
   const response = await fetch(`${API_BASE}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
