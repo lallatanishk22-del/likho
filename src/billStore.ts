@@ -148,3 +148,118 @@ export async function getTodaysSales(
     total: rows.reduce((sum, r) => sum + Number(r.total), 0),
   };
 }
+
+// ── Manual edit ──────────────────────────────────────────────────────
+//
+// The seller changing their own bill directly. This is deliberately a
+// SEPARATE path from anything the model proposes: here the seller states
+// exactly what they want, so there is no extraction, no trust layer, and
+// no approval step — they already approved it by typing it.
+//
+// Every mutation ends in a full deterministic recalculation, never an
+// incremental patch of the totals.
+
+import { calculateBill } from "./calculator.js";
+import type { OrderItem } from "./types.js";
+
+// Recomputes the whole bill from its stored items and writes a new
+// version. Called after EVERY mutation so totals can never drift out of
+// step with the items.
+export async function recalculateBill(
+  sessionId: string,
+  reason: ChangeReason,
+): Promise<StoredBill> {
+  const sessions = (await rest(`bill_sessions?id=eq.${sessionId}&select=*`)) as BillSessionRow[];
+  const session = sessions[0]!;
+
+  const items = (await rest(
+    `bill_items?bill_session_id=eq.${sessionId}&order=position.asc&select=*`,
+  )) as BillItemRow[];
+
+  const orderItems: OrderItem[] = items.map((i) => ({
+    name: i.name_snapshot,
+    quantity: i.quantity,
+    unitPrice: Number(i.unit_price),
+  }));
+
+  const bill = calculateBill(orderItems, Number(session.discount_percent));
+  const nextVersion = session.version + 1;
+
+  // Line totals are rewritten too — a quantity change must not leave a
+  // stale line_total behind.
+  for (let i = 0; i < items.length; i++) {
+    await rest(`bill_items?id=eq.${items[i]!.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ line_total: bill.lines[i]!.lineTotal }),
+    });
+  }
+
+  const updated = (await rest(`bill_sessions?id=eq.${sessionId}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      subtotal: bill.subtotal,
+      discount_amount: bill.discountAmount,
+      total: bill.total,
+      version: nextVersion,
+      status: "updated",
+      updated_at: new Date().toISOString(),
+    }),
+  })) as BillSessionRow[];
+
+  const refreshed = (await rest(
+    `bill_items?bill_session_id=eq.${sessionId}&order=position.asc&select=*`,
+  )) as BillItemRow[];
+
+  await writeVersion(sessionId, nextVersion, reason, {
+    session: updated[0],
+    items: refreshed,
+  });
+
+  return { session: updated[0]!, items: refreshed };
+}
+
+export async function addItemToBill(
+  sessionId: string,
+  item: { name: string; quantity: number; unitPrice: number; productId: string | null; priceSource: "stated" | "catalog" | "manual" },
+): Promise<StoredBill> {
+  const existing = (await rest(
+    `bill_items?bill_session_id=eq.${sessionId}&select=position`,
+  )) as { position: number }[];
+  const nextPosition = existing.length === 0 ? 0 : Math.max(...existing.map((e) => e.position)) + 1;
+
+  await rest("bill_items", {
+    method: "POST",
+    body: JSON.stringify({
+      bill_session_id: sessionId,
+      product_id: item.productId,
+      name_snapshot: item.name,
+      quantity: item.quantity,
+      unit_price: item.unitPrice,
+      line_total: item.quantity * item.unitPrice,
+      price_source: item.priceSource,
+      position: nextPosition,
+    }),
+  });
+
+  return recalculateBill(sessionId, "manual_edit");
+}
+
+// Returns null when nothing matched, so the caller can tell the seller
+// rather than silently doing nothing.
+export async function removeItemFromBill(
+  sessionId: string,
+  name: string,
+): Promise<StoredBill | null> {
+  const items = (await rest(
+    `bill_items?bill_session_id=eq.${sessionId}&select=id,name_snapshot`,
+  )) as { id: string; name_snapshot: string }[];
+
+  const target = name.toLowerCase().trim();
+  const match = items.find(
+    (i) => i.name_snapshot.toLowerCase() === target || i.name_snapshot.toLowerCase().includes(target),
+  );
+  if (!match) return null;
+
+  await rest(`bill_items?id=eq.${match.id}`, { method: "DELETE" });
+  return recalculateBill(sessionId, "manual_edit");
+}

@@ -2,7 +2,16 @@ import { routeParseOrder } from "./router.js";
 import { calculateBill } from "./calculator.js";
 import { formatBill } from "./formatter.js";
 import { getOrCreateBusinessForChannel, loadCatalog, upsertProduct, deactivateProduct } from "./catalogStore.js";
-import { createBillSession, getCurrentDraft, finalizeBill, getTodaysSales, type StoredBill } from "./billStore.js";
+import {
+  createBillSession,
+  getCurrentDraft,
+  finalizeBill,
+  getTodaysSales,
+  addItemToBill,
+  removeItemFromBill,
+  type StoredBill,
+} from "./billStore.js";
+import { buildCatalogIndex } from "./catalog.js";
 
 // Platform-independent command routing. Telegram polling (telegramBot.ts)
 // and the HTTP API used by n8n (apiServer.ts) both call handleIncoming(),
@@ -71,6 +80,11 @@ To bill someone else's message, long-press it → Reply → /zbill
 You can state a price to override your list for one bill:
   /zbill 2 paneer 150
 
+Change the open bill:
+  /plus 2 chutney     add an item
+  /plus 2 chutney 15  add with a one-off price
+  /minus chutney      remove an item
+
 Your current bill is remembered:
   /bill    show it again
   /done    mark it sent, count it in today's sales
@@ -137,6 +151,79 @@ async function handleOrder(
   } catch (err) {
     return (err as Error).message;
   }
+}
+
+// Manual edit. Parsed deterministically — NO model, no trust layer: the
+// seller is stating exactly what they want, so there is nothing to infer
+// and nothing to approve. This is a different path from Check Updates,
+// where the model PROPOSES changes that the seller must confirm.
+//
+//   /plus 2 chutney        price from the seller's list
+//   /plus 2 chutney 15     price stated explicitly, wins
+async function handleAddItem(businessId: string, args: string): Promise<string> {
+  const draft = await getCurrentDraft(businessId);
+  if (!draft) return "No open bill to add to. Start one with /zbill first.";
+
+  const tokens = args.trim().split(/\s+/).filter((t) => t.length > 0);
+  if (tokens.length < 2) {
+    return "Use: /plus <qty> <item> [price]\nExample: /plus 2 chutney";
+  }
+
+  const quantity = Number(tokens[0]);
+  if (!Number.isInteger(quantity) || quantity <= 0) {
+    return `"${tokens[0]}" isn't a quantity. Try: /plus 2 chutney`;
+  }
+
+  // A trailing number is an explicit price for this bill only.
+  const maybePrice = Number(tokens[tokens.length - 1]);
+  const hasStatedPrice = tokens.length > 2 && Number.isFinite(maybePrice) && maybePrice > 0;
+  const name = (hasStatedPrice ? tokens.slice(1, -1) : tokens.slice(1)).join(" ");
+
+  if (name.length === 0) return "Which item? Try: /plus 2 chutney";
+
+  let unitPrice: number;
+  let productId: string | null = null;
+  let priceSource: "stated" | "catalog" | "manual";
+
+  if (hasStatedPrice) {
+    unitPrice = maybePrice;
+    priceSource = "manual";
+  } else {
+    // Same price store and same strict matching the order path uses.
+    const catalog = await loadCatalog(businessId);
+    const index = buildCatalogIndex(catalog);
+    const key = name.toLowerCase().replace(/[^a-z0-9 ]/g, "").trim();
+    const singular = key.endsWith("es") ? key.slice(0, -2) : key.endsWith("s") ? key.slice(0, -1) : key;
+    const match = index.byKey.get(key) ?? index.byKey.get(singular);
+    if (!match) {
+      return `I don't have a price for "${name}". Add it with /add ${name} <price>, or state it: /plus ${quantity} ${name} 50`;
+    }
+    unitPrice = match.price;
+    productId = match.id;
+    priceSource = "catalog";
+  }
+
+  const updated = await addItemToBill(draft.session.id, {
+    name,
+    quantity,
+    unitPrice,
+    productId,
+    priceSource,
+  });
+  return `Added ${name} × ${quantity}.\n\n${renderStoredBill(updated)}`;
+}
+
+async function handleRemoveItem(businessId: string, args: string): Promise<string> {
+  const draft = await getCurrentDraft(businessId);
+  if (!draft) return "No open bill to change. Start one with /zbill first.";
+
+  const name = args.trim();
+  if (name.length === 0) return "Use: /minus <item>\nExample: /minus chutney";
+
+  const updated = await removeItemFromBill(draft.session.id, name);
+  if (!updated) return `"${name}" isn't on this bill.`;
+  if (updated.items.length === 0) return "That was the last item — the bill is now empty.";
+  return `Removed ${name}.\n\n${renderStoredBill(updated)}`;
 }
 
 async function handleShowBill(businessId: string): Promise<string> {
@@ -211,6 +298,12 @@ export async function handleIncoming(incoming: IncomingMessage): Promise<string>
             : sourceMessageId;
         return await handleOrder(businessId, orderText, anchorId, onSlowWork);
       }
+      case "/plus":
+      case "/additem":
+        return await handleAddItem(businessId, args);
+      case "/minus":
+      case "/removeitem":
+        return await handleRemoveItem(businessId, args);
       case "/bill":
         return await handleShowBill(businessId);
       case "/done":
