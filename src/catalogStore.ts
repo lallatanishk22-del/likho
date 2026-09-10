@@ -151,3 +151,96 @@ export async function renameProduct(
 
   return updated.length > 0 ? "renamed" : "not_found";
 }
+
+// --- Learned aliases ------------------------------------------------------
+//
+// When the seller answers "which one did you mean?", the answer is SAVED.
+// The word becomes an exact key on that product (buildCatalogIndex already
+// indexes aliases alongside names), so the same question is never asked
+// twice. This is the seller teaching their own price list — no model is
+// trained and nothing is shared between businesses.
+
+export async function addAlias(productId: string, alias: string): Promise<void> {
+  await rest("product_aliases?on_conflict=product_id,alias", {
+    method: "POST",
+    headers: { Prefer: "resolution=ignore-duplicates,return=minimal" },
+    body: JSON.stringify({ product_id: productId, alias: alias.toLowerCase().trim() }),
+  });
+}
+
+// --- Pending resolution ---------------------------------------------------
+//
+// The order Likho could not price, held so that tapping an answer re-runs
+// the ORIGINAL message rather than making the seller retype it.
+
+export interface PendingResolution {
+  message: string;
+  term: string;
+}
+
+export async function setPendingResolution(
+  businessId: string,
+  message: string,
+  term: string,
+): Promise<void> {
+  await rest("pending_resolutions?on_conflict=business_id", {
+    method: "POST",
+    headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+    body: JSON.stringify({
+      business_id: businessId,
+      message,
+      term,
+      created_at: new Date().toISOString(),
+    }),
+  });
+}
+
+export async function takePendingResolution(
+  businessId: string,
+): Promise<PendingResolution | null> {
+  const rows = (await rest(
+    `pending_resolutions?business_id=eq.${businessId}&select=message,term`,
+  )) as PendingResolution[];
+  if (rows.length === 0) return null;
+
+  await rest(`pending_resolutions?business_id=eq.${businessId}`, { method: "DELETE" });
+  return rows[0]!;
+}
+
+export async function getProductById(
+  businessId: string,
+  productId: string,
+): Promise<{ id: string; name: string } | null> {
+  const rows = (await rest(
+    `products?business_id=eq.${businessId}&id=eq.${productId}&active=eq.true&select=id,name`,
+  )) as { id: string; name: string }[];
+  return rows[0] ?? null;
+}
+
+// Everything this business has taught Likho. Visibility matters: a learned
+// alias silently changes how future orders are priced, so the seller must
+// be able to see the list and remove a wrong one.
+export async function loadAliases(
+  businessId: string,
+): Promise<{ alias: string; productName: string }[]> {
+  const rows = (await rest(
+    `product_aliases?select=alias,products!inner(name,business_id,active)` +
+      `&products.business_id=eq.${businessId}&products.active=eq.true&order=alias.asc`,
+  )) as { alias: string; products: { name: string } }[];
+  return rows.map((r) => ({ alias: r.alias, productName: r.products.name }));
+}
+
+export async function forgetAlias(businessId: string, alias: string): Promise<boolean> {
+  const products = (await rest(
+    `products?business_id=eq.${businessId}&select=id`,
+  )) as { id: string }[];
+  if (products.length === 0) return false;
+
+  const ids = products.map((p) => p.id).join(",");
+  const deleted = (await rest(
+    `product_aliases?alias=eq.${encodeURIComponent(alias.toLowerCase().trim())}` +
+      `&product_id=in.(${ids})`,
+    { method: "DELETE", headers: { Prefer: "return=representation" } },
+  )) as unknown[];
+  return Array.isArray(deleted) && deleted.length > 0;
+}

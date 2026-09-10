@@ -112,6 +112,39 @@ export interface CatalogMatch {
 // The full tiered lookup. Returns null when nothing is close enough, and
 // "ambiguous" when more than one product is equally close — which must ask
 // the seller, never pick a side.
+// Every product within reach of a name, best first. Used to offer the
+// seller a choice when a single answer cannot be justified.
+export function findCandidates(name: string, index: CatalogIndex): CatalogProduct[] {
+  const keys = candidateKeys(name);
+  const typed = keys[0] ?? "";
+  const scored = new Map<string, { product: CatalogProduct; distance: number }>();
+
+  for (const key of keys) {
+    const exact = index.byKey.get(key);
+    if (exact) scored.set(exact.id, { product: exact, distance: 0 });
+  }
+
+  const despaced = squeezeSpaces(typed);
+  const squeezed = squeezeRepeats(typed);
+  const budget = Math.max(distanceBudget(typed.length), 1);
+
+  for (const { key, product } of index.allKeys) {
+    if (scored.has(product.id)) continue;
+    let distance: number | null = null;
+    if (squeezeSpaces(key) === despaced || squeezeRepeats(key) === squeezed) {
+      distance = 1;
+    } else {
+      const d = editDistance(typed, key, budget);
+      if (d <= budget) distance = d;
+    }
+    if (distance !== null) scored.set(product.id, { product, distance });
+  }
+
+  return [...scored.values()]
+    .sort((a, b) => a.distance - b.distance || a.product.name.localeCompare(b.product.name))
+    .map((x) => x.product);
+}
+
 export function findProduct(
   name: string,
   index: CatalogIndex,
@@ -197,6 +230,11 @@ export interface ResolvedItem {
 export interface UnresolvedItem {
   name: string;
   reason: "not_in_catalog" | "ambiguous_in_catalog";
+  // Products the name could plausibly have meant. Populated for an
+  // ambiguous match so the seller can be OFFERED the choice rather than
+  // told to be more specific — being told "be more specific" about your
+  // own price list is a dead end.
+  candidates?: { id: string; name: string; price: number }[];
 }
 
 export interface PriceResolution {
@@ -248,7 +286,15 @@ export function resolvePrices(
     const found = findProduct(item.name, index);
 
     if (found === "ambiguous") {
-      unresolved.push({ name: item.name, reason: "ambiguous_in_catalog" });
+      unresolved.push({
+        name: item.name,
+        reason: "ambiguous_in_catalog",
+        candidates: findCandidates(item.name, index).map((p) => ({
+          id: p.id,
+          name: p.name,
+          price: p.price,
+        })),
+      });
       continue;
     }
     if (found === null) {
@@ -286,8 +332,12 @@ export function describeUnresolved(unresolved: UnresolvedItem[]): string {
     );
   }
   if (ambiguous.length > 0) {
-    const names = ambiguous.map((u) => `"${u.name}"`).join(", ");
-    parts.push(`${names} matches more than one product in your price list. Please be more specific.`);
+    const first = ambiguous[0]!;
+    const options = (first.candidates ?? []).map((c) => `  ${c.name}`).join("\n");
+    parts.push(
+      `"${first.name}" could be more than one thing in your price list:\n${options}\n\n` +
+        `Which one did you mean? I'll remember it.`,
+    );
   }
   return parts.join(" ");
 }

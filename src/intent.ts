@@ -24,6 +24,8 @@ export type IntentName =
   | "pdf"
   | "correction"
   | "rename"
+  | "learned"
+  | "forget"
   | "add_item"
   | "remove_item"
   | "order";
@@ -99,6 +101,15 @@ export function classifyIntent(rawText: string): Intent {
     /\bnot\s+\d/i.test(lower)
   ) {
     return { ...base, name: "correction" };
+  }
+
+  if (/\b(what have you learned|learned words|what you learned|aliases)\b/i.test(lower)) {
+    return { ...base, name: "learned" };
+  }
+
+  const forgetMatch = text.match(/^forget\s+(.+)$/i);
+  if (forgetMatch) {
+    return { ...base, name: "forget", text: forgetMatch[1]!.trim() };
   }
 
   // Renaming a product in the price list. Checked before the edit patterns

@@ -1,7 +1,11 @@
 import { routeParseOrder } from "./router.js";
 import { calculateBill } from "./calculator.js";
 import { formatBill } from "./formatter.js";
-import { getOrCreateBusinessForChannel, loadCatalog, upsertProduct, deactivateProduct, renameProduct } from "./catalogStore.js";
+import {
+  getOrCreateBusinessForChannel, loadCatalog, upsertProduct, deactivateProduct,
+  renameProduct, addAlias, setPendingResolution, takePendingResolution, getProductById,
+  loadAliases, forgetAlias,
+} from "./catalogStore.js";
 import { suggestSpelling, findNearDuplicate } from "./spellingSuggest.js";
 import {
   createBillSession,
@@ -17,7 +21,7 @@ import {
   getSales,
   type StoredBill,
 } from "./billStore.js";
-import { buildCatalogIndex, findProduct } from "./catalog.js";
+import { buildCatalogIndex, findProduct, CatalogResolutionError } from "./catalog.js";
 import { classifyIntent } from "./intent.js";
 import { parsePriceList } from "./priceList.js";
 import { formatBusinessDateTime, parseDateRange } from "./businessDay.js";
@@ -161,6 +165,11 @@ Then talk to me normally:
   show #1042               see any bill
   #1042 paid               record payment
   sales                    today's total
+  yesterday sales          any day, week or month
+
+When a name could mean two things I ask once and remember your answer:
+  what have you learned    see what you've taught me
+  forget paner             undo one
 
 Buttons on each bill do the same thing.`;
 
@@ -343,6 +352,37 @@ async function handleRename(businessId: string, args: string): Promise<Reply> {
   return { text: `Renamed "${from}" to "${to}". Past bills keep the name they were made with.` };
 }
 
+// What this business has taught Likho. A learned alias silently changes
+// how future orders are priced, so it must be visible and removable — a
+// wrong one would misprice quietly forever.
+async function handleLearned(businessId: string): Promise<Reply> {
+  const aliases = await loadAliases(businessId);
+  if (aliases.length === 0) {
+    return {
+      text:
+        "I haven't learned any words yet.\n\n" +
+        "When an order name could mean two things, I'll ask once and remember your answer.",
+    };
+  }
+  const lines = aliases.map((a) => `  "${a.alias}" \u2192 ${titleCase(a.productName)}`);
+  return {
+    text:
+      `Words you've taught me:\n\n${lines.join("\n")}\n\n` +
+      `Wrong one? Say:  forget ${aliases[0]!.alias}`,
+  };
+}
+
+async function handleForget(businessId: string, args: string): Promise<Reply> {
+  const word = args.trim();
+  if (word.length === 0) return { text: "Use: forget paner" };
+  const removed = await forgetAlias(businessId, word);
+  return {
+    text: removed
+      ? `Forgotten. I'll ask again next time "${word}" comes up.`
+      : `I haven't learned "${word}".`,
+  };
+}
+
 async function handlePrices(businessId: string): Promise<string> {
   const catalog = await loadCatalog(businessId);
   if (catalog.products.length === 0) {
@@ -390,6 +430,24 @@ async function handleOrder(
     const stored = await createBillSession(businessId, parsed, bill, sourceMessageId);
     return { text: renderStoredBill(stored), actions: billActions(stored) };
   } catch (err) {
+    // An ambiguous name is a question with a known set of answers. Offer
+    // them, and remember the message so the answer can re-run it — being
+    // told "be more specific" about your own price list is a dead end.
+    if (err instanceof CatalogResolutionError) {
+      const ambiguous = err.unresolved.find(
+        (u) => u.reason === "ambiguous_in_catalog" && (u.candidates?.length ?? 0) > 0,
+      );
+      if (ambiguous) {
+        await setPendingResolution(businessId, text, ambiguous.name);
+        return {
+          text: err.message,
+          actions: ambiguous.candidates!.slice(0, 4).map((c) => ({
+            label: `${titleCase(c.name)} \u2014 ${formatRupees(c.price)}`,
+            action: encodeMeant(c.id),
+          })),
+        };
+      }
+    }
     return { text: (err as Error).message };
   }
 }
@@ -656,7 +714,7 @@ const GREETING_REPLY =
 const KNOWN_COMMANDS = [
   "/start", "/help", "/add", "/prices", "/list", "/remove",
   "/zbill", "/plus", "/additem", "/minus", "/removeitem",
-  "/bill", "/done", "/sales", "/paid", "/open", "/rename",
+  "/bill", "/done", "/sales", "/paid", "/open", "/rename", "/learned", "/forget",
 ];
 
 // Telegram caps callback_data at 64 BYTES. A rename carries two arbitrary
@@ -675,6 +733,19 @@ export function decodeFix(action: string): { from: string; to: string } | null {
   const [from, to] = action.slice(4).split(FIX_SEPARATOR);
   if (!from || !to) return null;
   return { from, to };
+}
+
+// "You meant this product." Carries the product's id, which is stable and
+// short enough for a button; the word being aliased lives in the pending
+// row, so a long product name can never push this over the byte cap.
+export function encodeMeant(productId: string): string {
+  return `meant:${productId}`;
+}
+
+export function decodeMeant(action: string): string | null {
+  if (!action.startsWith("meant:")) return null;
+  const id = action.slice(6);
+  return /^[0-9a-f-]{36}$/i.test(id) ? id : null;
 }
 
 // A confirmed price change. The price rides in the action rather than
@@ -840,6 +911,10 @@ async function runIntent(
         return await handlePayment(businessId, intent.billNo, intent.amount);
       case "pdf":
         return { text: "PDF export isn't ready yet — the bill above is the record for now." };
+      case "learned":
+        return await handleLearned(businessId);
+      case "forget":
+        return await handleForget(businessId, intent.text);
       case "rename":
         return await handleRename(businessId, intent.text);
       case "add_item":
@@ -871,6 +946,32 @@ export async function handleAction(incoming: IncomingMessage, action: string): P
 
   // A spelling fix carries two names rather than a bill number, so it is
   // decoded before the number-based actions.
+  // Learning an alias: save it, then re-run the order that could not be
+  // priced. The seller taught their own price list; the same question is
+  // never asked again, because buildCatalogIndex treats an alias as an
+  // exact key.
+  const meantId = decodeMeant(action);
+  if (meantId) {
+    try {
+      const pending = await takePendingResolution(businessId);
+      const product = await getProductById(businessId, meantId);
+      if (!product) return { text: "That item isn't in your price list any more." };
+      if (!pending) {
+        return { text: "That question has already been answered. Send the order again." };
+      }
+
+      await addAlias(product.id, pending.term);
+
+      const rerun = await handleOrder(businessId, pending.message, null, incoming.onSlowWork);
+      return {
+        text: `Got it \u2014 "${pending.term}" means ${titleCase(product.name)}. I won't ask again.\n\n${rerun.text}`,
+        actions: rerun.actions,
+      };
+    } catch (err) {
+      return { text: `Something went wrong: ${(err as Error).message}` };
+    }
+  }
+
   const priceChange = decodePriceChange(action);
   if (priceChange) {
     try {
@@ -950,6 +1051,10 @@ async function runCommand(
         return { text: await handleRemove(businessId, args) };
       case "/rename":
         return await handleRename(businessId, args);
+      case "/learned":
+        return await handleLearned(businessId);
+      case "/forget":
+        return await handleForget(businessId, args);
       case "/zbill": {
         const replied = incoming.repliedText?.trim();
         const orderText = args.trim().length > 0 ? args.trim() : replied ?? "";
