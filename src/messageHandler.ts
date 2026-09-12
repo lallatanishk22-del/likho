@@ -25,6 +25,7 @@ import {
 } from "./billStore.js";
 import { buildCatalogIndex, findProduct, CatalogResolutionError } from "./catalog.js";
 import { classifyIntent } from "./intent.js";
+import { parseDiscount } from "./discount.js";
 import { parsePriceList, readsAsPriceList } from "./priceList.js";
 import { formatBusinessDateTime, parseDateRange, stripDateExpressions } from "./businessDay.js";
 import {
@@ -1151,9 +1152,14 @@ async function handleOrder(
     };
   }
 
+  // The discount is read here and taken OUT of the message. The model
+  // could not handle the extra number — see discount.ts — and it does not
+  // need to: a percentage is exact, so code reads it and code applies it.
+  const { percent: statedDiscount, rest: orderText } = parseDiscount(text);
+
   try {
-    const { parsed } = await routeParseOrder(text, { catalog });
-    const bill = calculateBill(parsed.items, parsed.discountPercent ?? 0);
+    const { parsed } = await routeParseOrder(orderText, { catalog });
+    const bill = calculateBill(parsed.items, statedDiscount ?? parsed.discountPercent ?? 0);
     // Persist as a draft so the bill survives the reply and can be looked
     // at, edited and updated later. This is what makes it a transaction
     // rather than a one-off message.
