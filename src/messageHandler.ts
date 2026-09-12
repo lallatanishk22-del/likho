@@ -21,6 +21,7 @@ import {
   setItemQuantity,
   getOpenBills,
   getSales,
+  setBillDiscount,
   type StoredBill,
 } from "./billStore.js";
 import { buildCatalogIndex, findProduct, CatalogResolutionError } from "./catalog.js";
@@ -1167,6 +1168,32 @@ async function handleSettle(businessId: string, text: string): Promise<Reply> {
 // answer in words — "keep only cake" went to the ORDER parser and came
 // back "Quantity for cake (1) isn't clearly supported". Asking a question
 // you cannot hear the answer to is worse than not asking.
+// Discounting a bill that already exists. The percentage came from the
+// deterministic parser; calculator.ts turns it into money.
+async function handleSetDiscount(
+  businessId: string,
+  percent: number,
+  text: string,
+): Promise<Reply> {
+  const named = await findCustomerInMessage(businessId, stripDateExpressions(text));
+  const customer = named && named !== "ambiguous" ? named.name : null;
+
+  const bill = await resolveBill(businessId, classifyIntent(text).billNo, customer);
+  if (!bill) {
+    return { text: "No open bill to discount. Send me an order first." };
+  }
+  if (bill.session.status === "finalized") {
+    return {
+      text:
+        `Bill #${bill.session.bill_no} is already confirmed, so its total is fixed.\n\n` +
+        `Discount the next one, or start a new bill.`,
+    };
+  }
+
+  const updated = await setBillDiscount(bill.session.id, percent);
+  return billReply(updated, `${percent}% off applied.`);
+}
+
 async function handleKeepOnly(businessId: string, name: string): Promise<Reply> {
   const wanted = name.trim();
   if (wanted.length === 0) return { text: 'Keep which one? Say: keep only cake' };
@@ -2005,6 +2032,8 @@ async function runIntent(
         return await handleLearned(businessId);
       case "forget":
         return await handleForget(businessId, intent.text);
+      case "set_discount":
+        return await handleSetDiscount(businessId, intent.amount ?? 0, text);
       case "keep_only":
         return await handleKeepOnly(businessId, intent.text);
       case "rename":

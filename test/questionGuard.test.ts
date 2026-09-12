@@ -103,3 +103,31 @@ test("a trailing question mark alone makes it a question", () => {
   assert.ok(isQuestion("ravi paid?"));
   assert.ok(!isQuestion("ravi paid"));
 });
+
+// --- The set must not go stale ------------------------------------------
+//
+// "did i add 10 percent discount" APPLIED one, because set_discount was a
+// new intent and nobody added it to MUTATING. A new state-changing intent
+// that is left out silently loses the guard.
+
+test("every state-changing intent is covered by the guard", () => {
+  // Each of these, phrased as a question, must NOT reach its own intent.
+  const asQuestions: [string, string][] = [
+    ["did i add 10 percent discount", "set_discount"],
+    ["did i keep only cake", "keep_only"],
+    ["did i confirm the bill", "confirm"],
+    ["has ravi paid", "payment"],
+    ["did i settle tanishk", "settle_customer"],
+    ["did i add 2 chutney", "add_item"],
+    ["did i remove lassi", "remove_item"],
+    ["did i rename panner", "rename"],
+    ["have i forgotten paner", "forget"],
+  ];
+  for (const [question, mustNotBe] of asQuestions) {
+    assert.notEqual(
+      classifyIntent(question).name,
+      mustNotBe,
+      `"${question}" reached ${mustNotBe} — a question changed state`,
+    );
+  }
+});

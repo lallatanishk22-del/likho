@@ -496,3 +496,19 @@ export async function setItemQuantity(
   });
   return recalculateBill(sessionId, "manual_edit");
 }
+
+// Sets the discount on an existing bill and recalculates it.
+//
+// The percentage is stored; calculator.ts turns it into money, clamped to
+// [0, subtotal] as it does for a discount stated at order time. Nothing
+// here does arithmetic.
+export async function setBillDiscount(
+  sessionId: string,
+  discountPercent: number,
+): Promise<StoredBill> {
+  await rest(`bill_sessions?id=eq.${sessionId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ discount_percent: discountPercent }),
+  });
+  return recalculateBill(sessionId, "manual_edit");
+}

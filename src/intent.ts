@@ -57,6 +57,7 @@
 // Every line above exists because something broke. Moving one moves money.
 
 import { stripDateExpressions } from "./businessDay.js";
+import { parseDiscount } from "./discount.js";
 
 export type IntentName =
   | "help"
@@ -70,6 +71,7 @@ export type IntentName =
   | "payment"
   | "pdf"
   | "correction"
+  | "set_discount"
   | "keep_only"
   | "rename"
   | "bill_format"
@@ -169,9 +171,13 @@ const GREETINGS = new Set([
 ]);
 
 // Intents that CHANGE money or state. A question must never reach one.
+// EVERY intent that changes state belongs here. A new one that is left out
+// silently loses the question guard — "did i add 10 percent discount" would
+// have APPLIED one, which is the exact failure this set exists to prevent.
 const MUTATING: ReadonlySet<IntentName> = new Set<IntentName>([
   "confirm", "payment", "settle_customer", "correction", "add_item",
-  "remove_item", "rename", "forget",
+  "remove_item", "rename", "forget", "set_discount", "keep_only",
+  "set_customer", "business_info",
 ]);
 
 // Is the seller ASKING rather than TELLING?
@@ -437,6 +443,25 @@ function classifyIntentInner(rawText: string): Intent {
   if (customerMatch && !/\d/.test(customerMatch[1]!)) {
     const named = extractCustomer(customerMatch[1]!);
     if (named) return { ...base, name: "set_customer", customer: named };
+  }
+
+  // A DISCOUNT ON A BILL THAT ALREADY EXISTS.
+  //
+  // "add a discount in the order 5 percent" was routed to add_item by the
+  // leading "add", and replied '"a" isn\'t a quantity'. No word list was
+  // needed to tell these apart, and none was added: the discount parser
+  // already finds the percentage, and what it leaves behind answers the
+  // rest of the question.
+  //
+  //   "dhruv 2 cakes 20% off"      remainder IS an order  -> bill it
+  //   "add 5 percent discount"     remainder is NOT       -> discount the
+  //                                                         open bill
+  //
+  // Extract what is deterministic first, then classify what is left. That
+  // is the same move that fixed dates, and it needs no vocabulary at all.
+  const discountHere = parseDiscount(text);
+  if (discountHere.percent !== null && !looksLikeOrderShape(discountHere.rest)) {
+    return { ...base, name: "set_discount", amount: discountHere.percent };
   }
 
   // --- Editing the open bill -------------------------------------------
