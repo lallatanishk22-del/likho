@@ -42,11 +42,11 @@ test("no template invents a total from the line items", () => {
   // template must print the 420 it was given.
   const sumOfLines = SAMPLE_BILL.items.reduce((t, i) => t + i.lineTotal, 0);
   assert.equal(sumOfLines, 400);
-  assert.equal(SAMPLE_BILL.total, 420);
+  assert.equal(SAMPLE_BILL.total, 450); // 400 + 20 GST + 30 delivery
 
   for (const id of ALL) {
     const text = visibleText(renderBill(SAMPLE_BILL, id));
-    assert.ok(text.includes("₹420"), `${id} lost the stored total`);
+    assert.ok(text.includes("₹450"), `${id} lost the stored total`);
   }
 });
 
@@ -54,7 +54,7 @@ test("summary rows never restate the total as a subtotal", () => {
   // With no discount and no tax, subtotal === total. Printing both makes a
   // bill look wrong, so the subtotal row is suppressed.
   const plain: BillData = {
-    ...SAMPLE_BILL, taxes: [], discountAmount: 0, discountPercent: 0,
+    ...SAMPLE_BILL, taxes: [], charges: [], discountAmount: 0, discountPercent: 0,
     subtotal: 400, total: 400,
   };
   const labels = summaryRows(plain).map((r) => r.label);

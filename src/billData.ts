@@ -58,6 +58,9 @@ export interface BillData {
   discountPercent: number;
   discountAmount: number;
   taxes: BillTaxView[];
+  // Charges that are not items — delivery, packing. Applied AFTER the
+  // discount, so a discount never quietly reduces a delivery fee.
+  charges: { label: string; amount: number }[];
   total: number;
   amountPaid: number;
   paymentStatus: BillPaymentStatus;

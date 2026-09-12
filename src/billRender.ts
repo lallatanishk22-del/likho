@@ -59,11 +59,12 @@ export function toBillData(stored: StoredBill, business: BusinessProfile): BillD
     // The engine does not calculate tax today. The field exists so the GST
     // section in every template is written and tested now, rather than
     // being bolted on later when it would touch six files at once.
+    charges: Array.isArray(session.charges) ? session.charges : [],
     taxes: [],
     total: Number(session.total),
     amountPaid: Number(session.amount_paid),
     paymentStatus: session.payment_status,
-    paymentMethod: null,
+    paymentMethod: session.payment_method ?? null,
     notes: null,
   };
 }

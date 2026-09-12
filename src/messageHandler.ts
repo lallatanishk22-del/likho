@@ -27,6 +27,7 @@ import {
 import { buildCatalogIndex, findProduct, CatalogResolutionError } from "./catalog.js";
 import { classifyIntent } from "./intent.js";
 import { parseDiscount } from "./discount.js";
+import { parseOrderExtras } from "./orderExtras.js";
 import { auditPriceList } from "./priceListAudit.js";
 import {
   handleCustomerHistory, handleOutstanding, handleStatement, handleSettle,
@@ -840,15 +841,29 @@ async function handleOrder(
   // The discount is read here and taken OUT of the message. The model
   // could not handle the extra number — see discount.ts — and it does not
   // need to: a percentage is exact, so code reads it and code applies it.
-  const { percent: statedDiscount, rest: orderText } = parseDiscount(text);
+  // Everything that is NOT an item comes out first — a delivery charge, a
+  // payment mode, an explicit customer line. Sent whole, a real order was
+  // refused because "30" (delivery) belonged to nothing the trust layer
+  // knew about. See orderExtras.ts.
+  const extras = parseOrderExtras(text);
+  const { percent: statedDiscount, rest: orderText } = parseDiscount(extras.rest);
 
   try {
     const { parsed } = await routeParseOrder(orderText, { catalog });
-    const bill = calculateBill(parsed.items, statedDiscount ?? parsed.discountPercent ?? 0);
+    const bill = calculateBill(
+      parsed.items,
+      statedDiscount ?? parsed.discountPercent ?? 0,
+      extras.charges,
+    );
     // Persist as a draft so the bill survives the reply and can be looked
     // at, edited and updated later. This is what makes it a transaction
     // rather than a one-off message.
-    const stored = await createBillSession(businessId, parsed, bill, sourceMessageId);
+    // An explicit "customer Rahul" line wins over whatever the model
+    // inferred — the seller said it outright.
+    const withCustomer = extras.customer ? { ...parsed, customer: extras.customer } : parsed;
+    const stored = await createBillSession(
+      businessId, withCustomer, bill, sourceMessageId, extras.paymentMethod,
+    );
     // An anonymous bill is a hole in the business's memory: it can never
     // be looked up by name, chased for payment, or counted toward what a
     // customer owes. Asked ONCE, here, rather than on every later render —

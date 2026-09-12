@@ -36,6 +36,11 @@ export interface BillSessionRow {
   // inferred from a customer's message.
   payment_status: "pending" | "partial" | "paid";
   amount_paid: string | number;
+  // Charges that are not items — delivery, packing. Added AFTER the
+  // discount, so a discount never silently reduces a delivery fee.
+  charges: { label: string; amount: number }[];
+  charges_total: string | number;
+  payment_method: string | null;
   updated_at: string;
 }
 
@@ -92,6 +97,7 @@ export async function createBillSession(
   parsed: ParsedOrder,
   bill: Bill,
   sourceMessageId: string | null,
+  paymentMethod: string | null = null,
 ): Promise<StoredBill> {
   const billNo = await allocateBillNo(businessId);
 
@@ -116,6 +122,9 @@ export async function createBillSession(
       subtotal: bill.subtotal,
       discount_percent: bill.discountPercent,
       discount_amount: bill.discountAmount,
+      charges: bill.charges,
+      charges_total: bill.chargesTotal,
+      payment_method: paymentMethod,
       total: bill.total,
     }),
   })) as BillSessionRow[];
@@ -267,7 +276,13 @@ export async function recalculateBill(
     unitPrice: Number(i.unit_price),
   }));
 
-  const bill = calculateBill(orderItems, Number(session.discount_percent));
+  // Charges survive an item edit: adding a chai does not remove the
+  // delivery fee, and recalculating without them would silently drop it.
+  const bill = calculateBill(
+    orderItems,
+    Number(session.discount_percent),
+    Array.isArray(session.charges) ? session.charges : [],
+  );
   const nextVersion = session.version + 1;
 
   // Line totals are rewritten too — a quantity change must not leave a
@@ -284,6 +299,8 @@ export async function recalculateBill(
     body: JSON.stringify({
       subtotal: bill.subtotal,
       discount_amount: bill.discountAmount,
+      charges: bill.charges,
+      charges_total: bill.chargesTotal,
       total: bill.total,
       version: nextVersion,
       status: "updated",

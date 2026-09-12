@@ -45,6 +45,9 @@ export function renderStoredBill(stored: StoredBill): string {
       right: `\u2212${formatRupees(Number(session.discount_amount))}`,
     });
   }
+  for (const charge of Array.isArray(session.charges) ? session.charges : []) {
+    summary.push({ left: charge.label, right: formatRupees(Number(charge.amount)) });
+  }
   summary.push({ left: "TOTAL", right: formatRupees(Number(session.total)) });
 
   // Money is RIGHT-aligned: the amounts must end in one column so they can
@@ -59,6 +62,7 @@ export function renderStoredBill(stored: StoredBill): string {
     r.left.padEnd(labelW + 3) + r.right.padStart(amountW);
 
   const who = session.customer_ref ? `${titleCase(session.customer_ref)} \u2014 ` : "";
+  const method = session.payment_method ? ` \u00b7 ${session.payment_method}` : "";
   const paid =
     session.payment_status === "paid"
       ? "Paid"
@@ -79,7 +83,7 @@ export function renderStoredBill(stored: StoredBill): string {
     "\u2500".repeat(width),
     ...summary.map(line),
     "",
-    `Payment: ${paid}`,
+    `Payment: ${paid}${method}`,
   ].join("\n");
 }
 

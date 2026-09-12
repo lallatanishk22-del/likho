@@ -70,7 +70,9 @@ export interface SummaryRow {
 
 export function summaryRows(data: BillData): SummaryRow[] {
   const rows: SummaryRow[] = [];
-  const hasDeductions = data.discountAmount > 0 || data.taxes.length > 0;
+  const charges = data.charges ?? [];
+  const hasDeductions =
+    data.discountAmount > 0 || data.taxes.length > 0 || charges.length > 0;
 
   // With nothing between subtotal and total the two are the same number,
   // and printing it twice makes a bill look wrong.
@@ -80,6 +82,11 @@ export function summaryRows(data: BillData): SummaryRow[] {
   if (data.discountAmount > 0) {
     const label = data.discountPercent > 0 ? `Discount (${data.discountPercent}%)` : "Discount";
     rows.push({ label, value: `−${rupees(data.discountAmount)}`, kind: "deduction" });
+  }
+  // Charges sit after the discount and before tax, matching the order the
+  // calculator applies them in — a bill must read the way it was computed.
+  for (const charge of charges) {
+    rows.push({ label: charge.label, value: rupees(charge.amount), kind: "normal" });
   }
   for (const tax of data.taxes) {
     const label = has(tax.rate) ? `${tax.label} ${tax.rate}%` : tax.label;
