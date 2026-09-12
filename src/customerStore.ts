@@ -421,3 +421,43 @@ export async function pendingSettlement(
       Math.round(unpaid.reduce((s, b) => s + Number(b.total) - Number(b.amount_paid), 0) * 100) / 100,
   };
 }
+
+// --- What the conversation is about --------------------------------------
+//
+// A person does not repeat the name in every sentence. After "tanishk",
+// "okay how much is the due amt" plainly still means Tanishk — but each
+// message was read in isolation, so it was answered shop-wide.
+//
+// Only the SUBJECT is remembered, never a transcript. And it is used only
+// to ANSWER: anything that changes money still needs the name said out
+// loud or a button tapped, so a stale subject can never cause a wrong write.
+
+export async function rememberCustomer(businessId: string, customerId: string): Promise<void> {
+  await rest("chat_context?on_conflict=business_id", {
+    method: "POST",
+    headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+    body: JSON.stringify({
+      business_id: businessId,
+      last_customer_id: customerId,
+      updated_at: new Date().toISOString(),
+    }),
+  });
+}
+
+// The customer last discussed, if it was recent. An hour old is still the
+// same conversation; yesterday's is not, and answering about them would be
+// worse than asking.
+const CONTEXT_TTL_MS = 60 * 60 * 1000;
+
+export async function recallCustomer(businessId: string): Promise<CustomerRow | null> {
+  const rows = (await rest(
+    `chat_context?business_id=eq.${businessId}&select=last_customer_id,updated_at`,
+  )) as { last_customer_id: string | null; updated_at: string }[];
+
+  const row = rows[0];
+  if (!row?.last_customer_id) return null;
+  if (Date.now() - Date.parse(row.updated_at) > CONTEXT_TTL_MS) return null;
+
+  const customers = await listCustomers(businessId);
+  return customers.find((c) => c.id === row.last_customer_id) ?? null;
+}

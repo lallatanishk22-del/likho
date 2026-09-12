@@ -40,7 +40,7 @@ import {
 import {
   CustomerAmbiguousError, findCustomer, findCustomerInMessage,
   loadCustomerHistory, listOutstanding, listCustomers,
-  settleAllForCustomer, pendingSettlement,
+  settleAllForCustomer, pendingSettlement, rememberCustomer, recallCustomer,
 } from "./customerStore.js";
 import { toBillData, toStatementData } from "./billRender.js";
 import { renderBill } from "./templates/index.js";
@@ -854,6 +854,8 @@ async function handleCustomerHistory(
     };
   }
 
+  await rememberCustomer(businessId, customer.id);
+
   const history = await loadCustomerHistory(businessId, customer, range);
   if (history.bills.length === 0) {
     return {
@@ -1015,6 +1017,8 @@ async function handleStatement(
   const customer = await findCustomer(businessId, name);
   if (!customer) return { text: `I don't have anyone called "${name}" yet.` };
 
+  await rememberCustomer(businessId, customer.id);
+
   const history = await loadCustomerHistory(businessId, customer, range, 1000);
   if (history.allBills.length === 0) {
     return {
@@ -1033,8 +1037,13 @@ async function handleStatement(
         path,
         caption:
           `${titleCase(customer.name)} · ${data.periodLabel}\n` +
-          `${data.billCount} bill(s) · ${formatRupees(data.grandTotal)} billed · ` +
-          `${formatRupees(data.outstanding)} outstanding`,
+          (data.billCount > 0
+            ? `${data.billCount} bill(s) · ${formatRupees(data.grandTotal)} billed · ` +
+              `${formatRupees(data.outstanding)} outstanding`
+            : "No confirmed bills") +
+          (data.draftCount > 0
+            ? `\n${data.draftCount} draft(s) · ${formatRupees(data.draftTotal)} — not counted`
+            : ""),
       },
     };
   } catch (err) {
@@ -1060,8 +1069,31 @@ async function handleSettle(businessId: string, text: string): Promise<Reply> {
     };
   }
 
+  await rememberCustomer(businessId, named.id);
+
   const pending = await pendingSettlement(businessId, named);
   if (pending.billNos.length === 0) {
+    // A draft cannot be paid, because it is not yet a transaction. Saying
+    // only "nothing outstanding" reads as "there is nothing here" while
+    // the seller is looking at unconfirmed bills worth real money.
+    const history = await loadCustomerHistory(businessId, named, null, 1000);
+    const drafts = history.allBills.filter((b) => b.status !== "finalized");
+    if (drafts.length > 0) {
+      const draftTotal =
+        Math.round(drafts.reduce((t, b) => t + Number(b.total), 0) * 100) / 100;
+      return {
+        text:
+          `${titleCase(named.name)} has nothing to settle — but ${drafts.length} bill` +
+          `${drafts.length === 1 ? " is" : "s are"} still unconfirmed ` +
+          `(${drafts.map((b) => `#${b.bill_no}`).join(", ")}, ${formatRupees(draftTotal)}).\n\n` +
+          `A draft isn't a transaction yet, so it can't be paid. Confirm ` +
+          `${drafts.length === 1 ? "it" : "them"} first, then mark ${drafts.length === 1 ? "it" : "them"} paid.`,
+        actions: drafts.slice(0, 3).map((b) => ({
+          label: `✅ Confirm #${b.bill_no}`,
+          action: `confirm:${b.bill_no}`,
+        })),
+      };
+    }
     return { text: `${titleCase(named.name)} has nothing outstanding — every confirmed bill is paid.` };
   }
 
@@ -1740,12 +1772,39 @@ async function runIntent(
         if (!named) return await notAnOrderReply(businessId, stripDateExpressions(text));
         return await handleStatement(businessId, named.name, parseDateRange(text), incoming.onSlowWork);
       }
-      case "customer_history":
-        return await handleCustomerHistory(businessId, intent.text);
+      case "customer_history": {
+        // intent.text is only a hint. When it names nobody real — or is
+        // absent because a question guard dropped it — scan the message
+        // against the seller's own customer list.
+        const direct = intent.text?.trim();
+        if (direct) {
+          const hit = await findCustomer(businessId, direct).catch(() => null);
+          if (hit) return await handleCustomerHistory(businessId, hit.name, parseDateRange(text));
+        }
+        const scanned = await findCustomerInMessage(businessId, stripDateExpressions(text));
+        if (scanned === "ambiguous") {
+          return { text: "That names more than one customer. Which one did you mean?" };
+        }
+        if (scanned) return await handleCustomerHistory(businessId, scanned.name, parseDateRange(text));
+
+        const recent = await recallCustomer(businessId);
+        if (recent) return await handleCustomerHistory(businessId, recent.name, parseDateRange(text));
+        return await notAnOrderReply(businessId, stripDateExpressions(text));
+      }
       case "settle_customer":
         return await handleSettle(businessId, text);
-      case "outstanding":
+      case "outstanding": {
+        // A follow-up question with no name means the person we were just
+        // discussing. Only the ANSWER uses this; nothing is written.
+        const namedHere = await findCustomerInMessage(businessId, stripDateExpressions(text));
+        if (!namedHere) {
+          const recent = await recallCustomer(businessId);
+          if (recent) return await handleCustomerHistory(businessId, recent.name);
+        } else if (namedHere !== "ambiguous") {
+          return await handleCustomerHistory(businessId, namedHere.name);
+        }
         return await handleOutstanding(businessId);
+      }
       case "mock":
         return await handleMock(businessId);
       case "bill_format":

@@ -121,7 +121,49 @@ const GREETINGS = new Set([
   "good evening", "good night", "gm", "ge",
 ]);
 
+// Intents that CHANGE money or state. A question must never reach one.
+const MUTATING: ReadonlySet<IntentName> = new Set<IntentName>([
+  "confirm", "payment", "settle_customer", "correction", "add_item",
+  "remove_item", "rename", "forget",
+]);
+
+// Is the seller ASKING rather than TELLING?
+//
+// "dude did i confirm tanishks bill" was routed to confirm — a question
+// about whether something happened was about to make it happen, and it had
+// even taken "dude did tanishks" as the customer name. A seller checking
+// their records must never change them by doing so.
+export function isQuestion(text: string): boolean {
+  const t = text.trim().toLowerCase();
+  return (
+    t.endsWith("?") ||
+    /^(did|do|does|have|has|had|is|are|was|were|can|could|should|will|would|am)\b/.test(t) ||
+    /^(dude|bhai|boss|yaar|man|hey|ok|okay|so)\s+(did|do|does|have|has|is|are|was|were|can|could|kya)\b/.test(t) ||
+    /\b(kya|kitna|kitne|kaun|kaunsa)\b/.test(t) ||
+    /^(how|what|which|who|when|where|why)\b/.test(t)
+  );
+}
+
 export function classifyIntent(rawText: string): Intent {
+  const asked = isQuestion(rawText);
+  const decided = classifyIntentInner(rawText);
+
+  // A question is answered, never acted on. Confirming, paying and
+  // settling all fall back to the read-only view of the same subject.
+  if (asked && MUTATING.has(decided.name)) {
+    // A question about a specific bill number can still open that bill.
+    if (decided.billNo) return { ...decided, name: "show_bill" };
+
+    // Otherwise answer about the PERSON. The customer field is dropped:
+    // it was filled by a parser built for commands and had taken "dude did
+    // tanishks" as a name. The handler rescans the message against the
+    // seller's real customer list instead.
+    return { ...decided, name: "customer_history", customer: null };
+  }
+  return decided;
+}
+
+function classifyIntentInner(rawText: string): Intent {
   const text = rawText.trim();
   const lower = text.toLowerCase();
   const billNo = extractBillNo(text);
