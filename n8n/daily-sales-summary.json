@@ -1,0 +1,53 @@
+{
+  "name": "Likho — Daily sales summary",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [ { "triggerAtHour": 21, "triggerAtMinute": 0 } ] }
+      },
+      "id": "schedule",
+      "name": "Every day 9pm",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [ 260, 300 ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:3000/api/message",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": \"sales\",\n  \"platformUserId\": \"6814590503\",\n  \"displayName\": \"Tanishk\"\n}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "ask",
+      "name": "Ask Likho for today's sales",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [ 520, 300 ]
+    },
+    {
+      "parameters": {
+        "chatId": "6814590503",
+        "text": "={{ '📊 Today\\'s summary\\n\\n' + $json.reply }}",
+        "additionalFields": {}
+      },
+      "id": "send",
+      "name": "Send summary to Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [ 800, 300 ],
+      "webhookId": "likho-daily-summary"
+    }
+  ],
+  "connections": {
+    "Every day 9pm": {
+      "main": [ [ { "node": "Ask Likho for today's sales", "type": "main", "index": 0 } ] ]
+    },
+    "Ask Likho for today's sales": {
+      "main": [ [ { "node": "Send summary to Telegram", "type": "main", "index": 0 } ] ]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}

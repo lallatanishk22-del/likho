@@ -1,7 +1,9 @@
-node_modules/
-dist/
-logs/
+
+!.env.example
+# launchd writes service logs here
+*.log
 .env
 .env.*
-!.env.example
-*.log
+dist/
+logs/
+node_modules/
