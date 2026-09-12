@@ -29,6 +29,32 @@ import { classifyIntent } from "./intent.js";
 import { parseDiscount } from "./discount.js";
 import { auditPriceList } from "./priceListAudit.js";
 import {
+  handleCustomerHistory, handleOutstanding, handleStatement, handleSettle,
+} from "./customerHandlers.js";
+import { HELP, GREETING_REPLY, KNOWN_COMMANDS, splitCommands, type ParsedCommand } from "./commands.js";
+export { splitCommands, type ParsedCommand };
+import type {
+  Platform, ReplyAction, ReplyPhoto, ReplyDocument, Reply, IncomingMessage,
+} from "./reply.js";
+
+// Re-exported so existing callers keep one import site.
+export type { Platform, ReplyAction, ReplyPhoto, ReplyDocument, Reply, IncomingMessage };
+import {
+  formatRupees, titleCase, renderStoredBill, billReply, billActions,
+  historyRow, alignedBlock,
+} from "./chatFormat.js";
+import {
+  encodeTemplate, decodeTemplate, encodeFix, decodeFix, encodeMeant, decodeMeant,
+  encodePriceChange, decodePriceChange, encodeMerge, decodeMerge,
+} from "./actionCodes.js";
+
+// Re-exported so callers and tests keep one import site while the button
+// encoding itself lives in actionCodes.ts.
+export {
+  encodeTemplate, decodeTemplate, encodeFix, decodeFix, encodeMeant, decodeMeant,
+  encodePriceChange, decodePriceChange, encodeMerge, decodeMerge,
+};
+import {
   setPendingChoice, clearPendingChoice, resolvePendingChoice, type ChoiceOption,
 } from "./pendingChoice.js";
 import { parsePriceList, readsAsPriceList } from "./priceList.js";
@@ -62,218 +88,6 @@ import { SAMPLE_BILL } from "./billSamples.js";
 // so every channel gets identical behaviour and the logic cannot drift
 // between them. Nothing here knows what Telegram is.
 
-export type Platform = "telegram" | "whatsapp";
-
-// A reply is text PLUS the actions a seller can take on it. The core names
-// the actions; each channel adapter decides how to show them (Telegram
-// inline buttons today, something else on WhatsApp later). Nothing here
-// knows what a button is.
-export interface ReplyAction {
-  label: string;
-  // Opaque to the channel: "confirm:1042". Routed back through
-  // handleAction() so a button press and a typed message run identical code.
-  action: string;
-}
-
-export interface ReplyPhoto {
-  path: string;
-  caption?: string;
-}
-
-export interface ReplyDocument {
-  path: string;
-  caption?: string;
-}
-
-export interface Reply {
-  text: string;
-  // The options this reply is asking the seller to pick between. Stored so
-  // the answer can be TYPED as well as tapped — see pendingChoice.ts.
-  choices?: ChoiceOption[];
-  // "HTML" lets a reply use <pre>, which is the only way Telegram will
-  // render a text table in a fixed-width font.
-  parseMode?: "HTML";
-  // Extra messages sent after this one. Used by /mock, which has to show
-  // several styles as SEPARATE bubbles — one message cannot be half
-  // proportional and half monospace.
-  follow?: Reply[];
-  actions?: ReplyAction[];
-  // Images to send before the text — used by the template picker, so the
-  // seller compares actual bills rather than six words.
-  photos?: ReplyPhoto[];
-  // A file to send, e.g. a rendered bill PDF.
-  document?: ReplyDocument;
-}
-
-export interface IncomingMessage {
-  platform: Platform;
-  // Stable per-seller identity on that platform (Telegram chat id today).
-  platformUserId: string;
-  displayName: string;
-  text: string;
-  messageId?: string | null;
-  // Text of a message being replied to — how an order written by someone
-  // else is handed to Likho without retyping it.
-  repliedText?: string | null;
-  repliedMessageId?: string | null;
-  // Text of a message the seller FORWARDED to Likho. Treated as the order
-  // itself: forwarding exists precisely so nothing has to be retyped.
-  forwardedText?: string | null;
-  // Optional hook so a slow channel can show a "working on it" signal.
-  onSlowWork?: () => Promise<void>;
-}
-
-// Renders a bill from STORED state, so the seller always sees exactly what
-// is persisted rather than a freshly recomputed guess.
-function formatRupees(amount: number): string {
-  const n = Number(amount);
-  const hasPaise = Math.round(n * 100) % 100 !== 0;
-  return `\u20b9${n.toLocaleString("en-IN", {
-    minimumFractionDigits: hasPaise ? 2 : 0,
-    maximumFractionDigits: 2,
-  })}`;
-}
-
-function titleCase(name: string): string {
-  return name.replace(/\b[a-z]/g, (c) => c.toUpperCase());
-}
-
-// The bill as an ARTIFACT, not a paragraph: aligned columns, a real
-// transaction number, and an explicit payment state. Rendered from STORED
-// state so the seller always sees exactly what is persisted.
-function renderStoredBill(stored: StoredBill): string {
-  const { session, items } = stored;
-
-  const rows = items.map((item) => ({
-    left: `${titleCase(item.name_snapshot)} \u00d7 ${item.quantity}`,
-    right: formatRupees(Number(item.line_total)),
-  }));
-
-  const summary: { left: string; right: string }[] = [];
-  if (Number(session.discount_percent) > 0) {
-    summary.push({ left: "Subtotal", right: formatRupees(Number(session.subtotal)) });
-    summary.push({
-      left: `Discount (${Number(session.discount_percent)}%)`,
-      right: `\u2212${formatRupees(Number(session.discount_amount))}`,
-    });
-  }
-  summary.push({ left: "TOTAL", right: formatRupees(Number(session.total)) });
-
-  // Money is RIGHT-aligned: the amounts must end in one column so they can
-  // be compared by eye. Left-padding the label only made them all START at
-  // the same place, which lines up nothing — Rs 45 and Rs 560 still ended
-  // four characters apart.
-  const all = [...rows, ...summary];
-  const labelW = Math.max(...all.map((r) => r.left.length));
-  const amountW = Math.max(...all.map((r) => r.right.length));
-  const width = labelW + 3 + amountW;
-  const line = (r: { left: string; right: string }) =>
-    r.left.padEnd(labelW + 3) + r.right.padStart(amountW);
-
-  const who = session.customer_ref ? `${titleCase(session.customer_ref)} \u2014 ` : "";
-  const paid =
-    session.payment_status === "paid"
-      ? "Paid"
-      : session.payment_status === "partial"
-        ? `Partly paid \u2014 ${formatRupees(Number(session.amount_paid))} of ${formatRupees(Number(session.total))}`
-        : "Pending";
-
-  // Every bill carries its own date and time, in the business's timezone.
-  // A bill without one is a message, not a record — and once several exist
-  // in a chat, "which day was this?" has no answer without it.
-  const stamp = formatBusinessDateTime(new Date(session.finalized_at ?? session.created_at));
-
-  return [
-    `\u{1f9fe} ${who}Bill #${session.bill_no}`,
-    stamp,
-    "",
-    ...rows.map(line),
-    "\u2500".repeat(width),
-    ...summary.map(line),
-    "",
-    `Payment: ${paid}`,
-  ].join("\n");
-}
-
-// Every reply that shows a bill goes through here.
-//
-// The bill is wrapped in <pre> so Telegram draws it in a FIXED-WIDTH font.
-// The columns were always computed — padEnd has been in renderStoredBill
-// from the start — but the message was sent with no parse_mode, so
-// Telegram drew it proportionally and threw the padding away. "M" is wider
-// than "i", so the money column came out ragged no matter what.
-//
-// A note ("Added chai x 2.") stays OUTSIDE the block: prose in a monospace
-// font is harder to read, and only the table needs the alignment.
-function billReply(stored: StoredBill, note?: string): Reply {
-  const body = `<pre>${escapeHtml(renderStoredBill(stored))}</pre>`;
-  return {
-    text: note ? `${escapeHtml(note)}\n${body}` : body,
-    parseMode: "HTML" as const,
-    actions: billActions(stored),
-  };
-}
-
-// Actions offered alongside a bill. A draft's primary action is Confirm;
-// once confirmed the useful actions are payment and PDF.
-function billActions(stored: StoredBill): ReplyAction[] {
-  const no = stored.session.bill_no;
-  const actions: ReplyAction[] = [];
-  if (stored.session.status !== "finalized") {
-    actions.push({ label: "\u2705 Confirm", action: `confirm:${no}` });
-  }
-  if (stored.session.payment_status !== "paid") {
-    actions.push({ label: "\u{1f4b0} Mark Paid", action: `paid:${no}` });
-  }
-  actions.push({ label: "\u{1f4c4} PDF", action: `pdf:${no}` });
-  return actions;
-}
-
-const HELP = `Likho \u2014 send me the order, I'll make the bill.
-
-Just type it. No commands needed:
-  Ravi 2 paneer 1 lassi
-
-Or forward the customer's message straight to me.
-
-Set your rates first, one per line:
-  /add paneer 220
-  lassi 80
-  samosa 20
-
-Then talk to me normally:
-  actually paneer was 3    fix the open bill
-  add 2 samosa             add to it
-  remove lassi             take it off
-  show #1042               see any bill
-  #1042 paid               record payment
-  sales                    today's total
-  yesterday sales          any day, week or month
-
-Your bill's look:
-  bill format              see all 6 styles, pick one
-  shop phone 98200 41122   your details on the bill
-  shop gstin 27AAB...      add GST, UPI, address
-
-When a name could mean two things I ask once and remember your answer:
-  what have you learned    see what you've taught me
-  forget paner             undo one
-
-Buttons on each bill do the same thing.
-
-  setup                    redo your shop setup`;
-
-// Saves prices in whatever shape the seller typed them - see priceList.ts.
-// Partial success is deliberate: an unreadable fragment must never discard
-// the items that WERE understood.
-//
-// Each entry is one of three things, and they are NOT the same:
-//   new           - save it
-//   same price    - nothing to do, say so
-//   price change  - ASK. Changing a saved price changes what every future
-//                   bill charges, and it happened silently before: typing
-//                   "/add paneer 100" when paneer was 200 quietly halved
-//                   the price with a reply that read like a fresh save.
 async function handleAdd(businessId: string, args: string): Promise<Reply> {
   const { entries, unreadable } = parsePriceList(args);
 
@@ -514,15 +328,6 @@ async function handleForget(businessId: string, args: string): Promise<Reply> {
 }
 
 // --- Bill style ----------------------------------------------------------
-
-export function encodeTemplate(id: string): string {
-  return `tpl:${id}`;
-}
-export function decodeTemplate(action: string): string | null {
-  if (!action.startsWith("tpl:")) return null;
-  const id = action.slice(4);
-  return TEMPLATE_IDS.includes(id as never) ? id : null;
-}
 
 // Shows all six styles as ACTUAL RENDERED BILLS, using the seller's own
 // shop name and their own last order where one exists. Six names would ask
@@ -836,181 +641,6 @@ async function handleMock(businessId: string): Promise<Reply> {
 // RULE: reading history NEVER writes. It cannot create a customer, open a
 // draft, or change a total. That is what makes a bare name safe to type.
 
-// One bill, as one line, in columns.
-//
-// It used to take TWO lines per bill with nothing aligned, so a list of
-// five bills was ten ragged rows and the amounts could not be compared by
-// eye. Money is right-aligned in a fixed column and the year is dropped —
-// inside a stated period it is the same on every row and only steals width.
-interface HistoryRow {
-  no: string;
-  when: string;
-  amount: string;
-  mark: string;
-}
-
-function historyRow(bill: {
-  bill_no: number; total: string | number; amount_paid: string | number;
-  payment_status: string; status: string; created_at: string; finalized_at: string | null;
-}): HistoryRow {
-  const at = new Date(bill.finalized_at ?? bill.created_at);
-  // "10 Sep" — the year is carried by the heading, not repeated per row.
-  const when = new Intl.DateTimeFormat("en-IN", {
-    timeZone: process.env["LIKHO_TIMEZONE"] ?? "Asia/Kolkata",
-    day: "numeric", month: "short",
-  }).format(at);
-
-  const due = Number(bill.total) - Number(bill.amount_paid);
-  const mark =
-    bill.status !== "finalized" ? "draft"
-    : bill.payment_status === "paid" ? "paid"
-    : bill.payment_status === "partial" ? `${formatRupees(due)} due`
-    : "unpaid";
-
-  return { no: `#${bill.bill_no}`, when, amount: formatRupees(Number(bill.total)), mark };
-}
-
-// Lays rows out as a monospace block. Telegram draws <pre> in a fixed-width
-// font, which is the only way spaces become a real column — padding a
-// proportional font does nothing, which is why the old list stayed ragged
-// however much it was padded.
-//
-// The summary is laid out by this SAME function, so the totals sit in the
-// same money column as the bills above them instead of drifting.
-function alignedBlock(
-  rows: { left: string; amount: string; right?: string }[],
-): { lines: string[]; width: number } {
-  const leftW = Math.max(...rows.map((r) => r.left.length));
-  const amtW = Math.max(...rows.map((r) => r.amount.length));
-  const lines = rows.map((r) => {
-    const core = `${r.left.padEnd(leftW)}  ${r.amount.padStart(amtW)}`;
-    return r.right ? `${core}  ${r.right}` : core;
-  });
-  return { lines, width: Math.max(...lines.map((l) => l.length)) };
-}
-
-async function handleCustomerHistory(
-  businessId: string,
-  name: string,
-  range?: { label: string; from: Date; to: Date } | null,
-): Promise<Reply> {
-  const customer = await findCustomer(businessId, name);
-  if (!customer) {
-    return {
-      text:
-        `I don't have anyone called "${name}" yet.\n\n` +
-        `They'll appear here after their first bill. Send one like:\n  ${name} 2 chai`,
-    };
-  }
-
-  await rememberCustomer(businessId, customer.id);
-
-  const history = await loadCustomerHistory(businessId, customer, range);
-  if (history.bills.length === 0) {
-    return {
-      text: range
-        ? `${titleCase(customer.name)} has no bills ${range.label.toLowerCase() === "today" || range.label.toLowerCase() === "yesterday" ? range.label.toLowerCase() : `in ${range.label.toLowerCase()}`}.`
-        : `${titleCase(customer.name)} has no bills yet.`,
-    };
-  }
-
-  const rows = history.bills.map(historyRow);
-
-  // Drafts are counted SEPARATELY and always shown. Previously the whole
-  // summary was skipped when nothing was confirmed, so a customer with two
-  // draft bills saw no total at all — the money was simply invisible.
-  const draftBills = history.allBills.filter((b) => b.status !== "finalized");
-  const draftTotal =
-    Math.round(draftBills.reduce((sum, b) => sum + Number(b.total), 0) * 100) / 100;
-
-  const billRows = rows.map((r) => ({ left: r.no, amount: r.amount, right: r.when + (r.mark ? `  ${r.mark}` : "") }));
-
-  const summaryRows: { left: string; amount: string; right?: string }[] = [];
-  if (history.billCount > 0) {
-    summaryRows.push({
-      left: `${history.billCount} bill${history.billCount === 1 ? "" : "s"}`,
-      amount: formatRupees(history.lifetimeTotal),
-    });
-    if (history.outstanding > 0) {
-      summaryRows.push({ left: "unpaid", amount: formatRupees(history.outstanding) });
-    } else {
-      summaryRows.push({ left: "all paid", amount: "" });
-    }
-  }
-  if (draftBills.length > 0) {
-    summaryRows.push({
-      left: `${draftBills.length} draft${draftBills.length === 1 ? "" : "s"}`,
-      amount: formatRupees(draftTotal),
-      right: "not counted",
-    });
-  }
-
-  // The bills align among themselves. The summary is right-aligned to the
-  // block edge instead of sharing their columns: forcing "4 drafts" into
-  // the bill-number column padded every row out and left a gully down the
-  // middle of the list.
-  const bills = alignedBlock(billRows);
-  const width = Math.max(
-    bills.width,
-    ...summaryRows.map((r) => `${r.left}  ${r.amount}${r.right ? `  ${r.right}` : ""}`.length),
-  );
-  const summaryLines = summaryRows.map((r) => {
-    const tail = r.right ? `  ${r.right}` : "";
-    const pad = Math.max(1, width - r.left.length - r.amount.length - tail.length);
-    return `${r.left}${" ".repeat(pad)}${r.amount}${tail}`;
-  });
-
-  const heading = range
-    ? `${titleCase(customer.name).toUpperCase()}\n${range.label}`
-    : titleCase(customer.name).toUpperCase();
-
-  const block = [
-    heading,
-    "",
-    ...bills.lines,
-    "\u2500".repeat(Math.min(width, 34)),
-    ...summaryLines.map((l) => l.trimEnd()),
-  ].join("\n");
-
-  const more = history.allBills.length > history.bills.length;
-
-  return {
-    text:
-      `<pre>${escapeHtml(block)}</pre>` +
-      (more ? `\nShowing the latest ${history.bills.length} of ${history.allBills.length}.` : ""),
-    parseMode: "HTML" as const,
-    // The most recent few, tappable — scrolling a chat to find a number and
-    // then typing it back is work the buttons can do.
-    actions: [
-      ...history.bills.slice(0, 3).map((b) => ({
-        label: `#${b.bill_no} · ${formatRupees(Number(b.total))}`,
-        action: `open:${b.bill_no}`,
-      })),
-      { label: "📄 Statement PDF", action: `stmt:${customer.id}` },
-    ],
-  };
-}
-
-async function handleOutstanding(businessId: string): Promise<Reply> {
-  const owing = await listOutstanding(businessId);
-  if (owing.length === 0) {
-    return { text: "Nobody owes you anything. Every confirmed bill is paid." };
-  }
-  const total = owing.reduce((sum, o) => sum + o.outstanding, 0);
-  const lines = owing
-    .slice(0, 15)
-    .map((o) => `${titleCase(o.name)}\n   ${formatRupees(o.outstanding)} · ${o.billCount} bill${o.billCount === 1 ? "" : "s"}`);
-  return {
-    text:
-      `${formatRupees(Math.round(total * 100) / 100)} owed across ${owing.length} customer${owing.length === 1 ? "" : "s"}\n\n` +
-      lines.join("\n") +
-      (owing.length > 15 ? `\n\nShowing the top 15.` : ""),
-  };
-}
-
-// Does this message name something the seller actually sells? Used to tell
-// an unfinished order ("ravi paneer" — worth asking the quantity) from a
-// message that was never an order at all ("dude bill of ria whole time").
 async function mentionsKnownProduct(businessId: string, text: string): Promise<boolean> {
   const catalog = await loadCatalog(businessId);
   if (catalog.products.length === 0) return false;
@@ -1049,125 +679,6 @@ async function notAnOrderReply(businessId: string, text: string): Promise<Reply>
   };
 }
 
-// A customer's whole account as one PDF. Asked for as "lifetime bill of
-// ria", "tanishk monthly", "ravi weekly statement".
-//
-// Every figure comes from stored bills — the same numbers the chat shows,
-// because both read the same rows. A statement that disagreed with the
-// bills it lists would be worse than no statement.
-async function handleStatement(
-  businessId: string,
-  name: string,
-  range: { label: string; from: Date; to: Date } | null,
-  onSlowWork?: () => Promise<void>,
-): Promise<Reply> {
-  await onSlowWork?.();
-
-  const customer = await findCustomer(businessId, name);
-  if (!customer) return { text: `I don't have anyone called "${name}" yet.` };
-
-  await rememberCustomer(businessId, customer.id);
-
-  const history = await loadCustomerHistory(businessId, customer, range, 1000);
-  if (history.allBills.length === 0) {
-    return {
-      text: `${titleCase(customer.name)} has no bills${range ? ` in ${range.label.toLowerCase()}` : ""}.`,
-    };
-  }
-
-  const business = await loadBusinessProfile(businessId);
-  const data = await toStatementData(history, business, history.allBills);
-
-  try {
-    const path = await htmlToPdf(renderStatement(data), `statement-${customer.name}`);
-    return {
-      text: "",
-      document: {
-        path,
-        caption:
-          `${titleCase(customer.name)} · ${data.periodLabel}\n` +
-          (data.billCount > 0
-            ? `${data.billCount} bill(s) · ${formatRupees(data.grandTotal)} billed · ` +
-              `${formatRupees(data.outstanding)} outstanding`
-            : "No confirmed bills") +
-          (data.draftCount > 0
-            ? `\n${data.draftCount} draft(s) · ${formatRupees(data.draftTotal)} — not counted`
-            : ""),
-      },
-    };
-  } catch (err) {
-    if (err instanceof PdfUnavailableError) {
-      return { text: "I can't make PDFs on this machine — no Chrome found." };
-    }
-    throw err;
-  }
-}
-
-// Settling a whole account. Money changing across several bills at once
-// gets a tap first — the seller sees exactly which bills and how much
-// before anything is written, the same as a price change or a merge.
-async function handleSettle(businessId: string, text: string): Promise<Reply> {
-  const named = await findCustomerInMessage(businessId, stripDateExpressions(text));
-  if (named === "ambiguous") {
-    return { text: "That names more than one customer. Which one did you mean?" };
-  }
-  if (!named) {
-    return {
-      text:
-        "Whose bills are settled?\n\nSay it with the name:\n  tanishk cleared all his dues",
-    };
-  }
-
-  await rememberCustomer(businessId, named.id);
-
-  const pending = await pendingSettlement(businessId, named);
-  if (pending.billNos.length === 0) {
-    // A draft cannot be paid, because it is not yet a transaction. Saying
-    // only "nothing outstanding" reads as "there is nothing here" while
-    // the seller is looking at unconfirmed bills worth real money.
-    const history = await loadCustomerHistory(businessId, named, null, 1000);
-    const drafts = history.allBills.filter((b) => b.status !== "finalized");
-    if (drafts.length > 0) {
-      const draftTotal =
-        Math.round(drafts.reduce((t, b) => t + Number(b.total), 0) * 100) / 100;
-      return {
-        text:
-          `${titleCase(named.name)} has nothing to settle — but ${drafts.length} bill` +
-          `${drafts.length === 1 ? " is" : "s are"} still unconfirmed ` +
-          `(${drafts.map((b) => `#${b.bill_no}`).join(", ")}, ${formatRupees(draftTotal)}).\n\n` +
-          `A draft isn't a transaction yet, so it can't be paid. Confirm ` +
-          `${drafts.length === 1 ? "it" : "them"} first, then mark ${drafts.length === 1 ? "it" : "them"} paid.`,
-        actions: drafts.slice(0, 3).map((b) => ({
-          label: `✅ Confirm #${b.bill_no}`,
-          action: `confirm:${b.bill_no}`,
-        })),
-      };
-    }
-    return { text: `${titleCase(named.name)} has nothing outstanding — every confirmed bill is paid.` };
-  }
-
-  return {
-    text:
-      `${titleCase(named.name)} has ${pending.billNos.length} unpaid bill` +
-      `${pending.billNos.length === 1 ? "" : "s"}: ` +
-      `${pending.billNos.map((n) => `#${n}`).join(", ")}\n\n` +
-      `Mark all of them paid? That records ${formatRupees(pending.amount)} received.`,
-    actions: [{ label: `✅ Mark ${formatRupees(pending.amount)} paid`, action: `settle:${named.id}` }],
-  };
-}
-
-// The price list, plus anything wrong with it.
-//
-// These checks only ever ran at /add time, so a list built up over weeks —
-// a typo here, a bad parse there, the same item entered twice — was never
-// looked at again. The problems just sat there printing onto customers'
-// bills. Showing the list is the natural moment to surface them.
-// "keep only cake", typed rather than tapped.
-//
-// The bot asked which of two names to keep, then could not understand the
-// answer in words — "keep only cake" went to the ORDER parser and came
-// back "Quantity for cake (1) isn't clearly supported". Asking a question
-// you cannot hear the answer to is worse than not asking.
 // Discounting a bill that already exists. The percentage came from the
 // deterministic parser; calculator.ts turns it into money.
 async function handleSetDiscount(
@@ -1699,134 +1210,6 @@ async function handleCorrection(businessId: string, text: string): Promise<Reply
   };
 }
 
-const GREETING_REPLY =
-  "Hi! Send me an order and I'll make the bill.\n\n" +
-  "  Ravi 2 paneer 1 lassi\n\n" +
-  "You can also forward a customer's message straight to me.";
-
-// Every command Likho understands. Commands are now OPTIONAL shortcuts —
-// normal typing is handled by the intent layer — but they stay supported
-// because a seller who learned them shouldn't be broken.
-const KNOWN_COMMANDS = [
-  "/start", "/help", "/add", "/prices", "/list", "/items", "/menu", "/rates", "/remove",
-  "/zbill", "/plus", "/additem", "/minus", "/removeitem",
-  "/bill", "/done", "/sales", "/paid", "/open", "/rename", "/learned", "/forget",
-  "/format", "/style", "/shop", "/pdf", "/setup", "/mock",
-];
-
-// Telegram caps callback_data at 64 BYTES. A rename carries two arbitrary
-// product names, so it can overflow — in which case no button is offered
-// and the seller is given the typed command instead. Returning null rather
-// than truncating matters: a truncated name would rename the wrong thing.
-const FIX_SEPARATOR = "\u001f"; // unit separator; cannot occur in a product name
-
-export function encodeFix(from: string, to: string): string | null {
-  const action = `fix:${from}${FIX_SEPARATOR}${to}`;
-  return Buffer.byteLength(action, "utf8") <= 64 ? action : null;
-}
-
-export function decodeFix(action: string): { from: string; to: string } | null {
-  if (!action.startsWith("fix:")) return null;
-  const [from, to] = action.slice(4).split(FIX_SEPARATOR);
-  if (!from || !to) return null;
-  return { from, to };
-}
-
-// "You meant this product." Carries the product's id, which is stable and
-// short enough for a button; the word being aliased lives in the pending
-// row, so a long product name can never push this over the byte cap.
-export function encodeMeant(productId: string): string {
-  return `meant:${productId}`;
-}
-
-export function decodeMeant(action: string): string | null {
-  if (!action.startsWith("meant:")) return null;
-  const id = action.slice(6);
-  return /^[0-9a-f-]{36}$/i.test(id) ? id : null;
-}
-
-// A confirmed price change. The price rides in the action rather than
-// being looked up again, so what the seller taps is exactly what they were
-// shown - a second /add in between cannot change it underneath them.
-export function encodePriceChange(name: string, price: number): string | null {
-  const action = `price:${name}${FIX_SEPARATOR}${price}`;
-  return Buffer.byteLength(action, "utf8") <= 64 ? action : null;
-}
-
-export function decodePriceChange(action: string): { name: string; price: number } | null {
-  if (!action.startsWith("price:")) return null;
-  const [name, rawPrice] = action.slice(6).split(FIX_SEPARATOR);
-  if (!name || rawPrice === undefined) return null;
-  const price = Number(rawPrice);
-  if (!Number.isFinite(price) || price < 0) return null;
-  return { name, price };
-}
-
-// Merging drops the older duplicate and keeps what the seller just typed.
-export function encodeMerge(drop: string): string | null {
-  const action = `merge:${drop}`;
-  return Buffer.byteLength(action, "utf8") <= 64 ? action : null;
-}
-
-export function decodeMerge(action: string): string | null {
-  if (!action.startsWith("merge:")) return null;
-  const name = action.slice(6);
-  return name.length > 0 ? name : null;
-}
-
-export interface ParsedCommand {
-  command: string;
-  args: string;
-}
-
-// THE RULE: one message = a sequence of commands, run top to bottom.
-//
-// A command starts at the beginning of a line, or mid-line after
-// whitespace. Everything up to the next command is its arguments:
-//
-//   /add samosa 20\nchai 15         -> one /add, two lines of arguments
-//   /zbill 2 chai\n/plus 1 mithai   -> two commands
-//   /zbill 2 chai /plus 1 mithai    -> two commands (same line)
-//
-// Splitting deterministically here means the model never has to guess
-// whether "/add mithai 10" was an instruction or part of an order.
-export function splitCommands(text: string): ParsedCommand[] {
-  const trimmed = text.trim();
-  if (trimmed.length === 0) return [];
-
-  const hits: { index: number; command: string }[] = [];
-  for (const cmd of KNOWN_COMMANDS) {
-    const pattern = new RegExp(`(^|\\s)(${cmd})(?=\\s|$)`, "gi");
-    for (const m of trimmed.matchAll(pattern)) {
-      hits.push({ index: m.index! + m[1]!.length, command: cmd });
-    }
-  }
-
-  if (hits.length === 0) return [{ command: "", args: trimmed }];
-
-  hits.sort((a, b) => a.index - b.index);
-
-  // Text BEFORE the first command belongs to that command. It used to be
-  // discarded, which silently dropped the customer from
-  // "ria bhanushali /zbill 3 mudpie" — the bill came out with no name and
-  // nothing indicated why. People put the command where it falls in the
-  // sentence; the parser has to read the whole sentence.
-  const prefix = trimmed.slice(0, hits[0]!.index).trim();
-
-  const parsed: ParsedCommand[] = [];
-  for (let i = 0; i < hits.length; i++) {
-    const hit = hits[i]!;
-    const argsStart = hit.index + hit.command.length;
-    const argsEnd = i + 1 < hits.length ? hits[i + 1]!.index : trimmed.length;
-    const args = trimmed.slice(argsStart, argsEnd).trim();
-    parsed.push({
-      command: hit.command.toLowerCase(),
-      args: i === 0 && prefix.length > 0 ? `${prefix} ${args}`.trim() : args,
-    });
-  }
-  return parsed;
-}
-
 async function resolveBusiness(incoming: IncomingMessage): Promise<string> {
   return getOrCreateBusinessForChannel(
     incoming.platform,
@@ -2011,8 +1394,15 @@ async function runIntent(
       case "outstanding": {
         // A follow-up question with no name means the person we were just
         // discussing. Only the ANSWER uses this; nothing is written.
+        //
+        // But "who hasn't paid" asks across EVERYONE — the word "who" is
+        // the question. Falling back to the last customer there answered a
+        // shop-wide question about one person, which is a worse error than
+        // not remembering at all.
+        const asksEveryone = /\b(who|kaun|kisne|everyone|everybody|all|sab|sabhi)\b/i.test(text);
         const namedHere = await findCustomerInMessage(businessId, stripDateExpressions(text));
         if (!namedHere) {
+          if (asksEveryone) return await handleOutstanding(businessId);
           const recent = await recallCustomer(businessId);
           if (recent) return await handleCustomerHistory(businessId, recent.name);
         } else if (namedHere !== "ambiguous") {

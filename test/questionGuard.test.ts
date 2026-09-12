@@ -131,3 +131,22 @@ test("every state-changing intent is covered by the guard", () => {
     );
   }
 });
+
+// --- Remembered context must not answer a shop-wide question ------------
+//
+// "who hasn't paid" returned one customer's history, because the message
+// named nobody and the last-discussed customer was used as a fallback. But
+// "who" IS the question — it asks across everyone. Answering it about one
+// person is a worse error than not remembering at all.
+
+test("'who' asks across everyone, so context cannot narrow it", () => {
+  for (const q of ["who hasn't paid", "who owes me", "kaun baaki hai", "who has not paid"]) {
+    assert.equal(classifyIntent(q).name, "outstanding", q);
+  }
+});
+
+test("a follow-up with no 'who' can still use context", () => {
+  // "how much is the due amt" after discussing someone is about them.
+  assert.equal(classifyIntent("okay how much is the due amt").name, "outstanding");
+  // ...and the handler decides, since only it knows who was discussed.
+});
