@@ -24,7 +24,7 @@ import {
   type StoredBill,
 } from "./billStore.js";
 import { buildCatalogIndex, findProduct, CatalogResolutionError } from "./catalog.js";
-import { classifyIntent } from "./intent.js";
+import { classifyIntent, extractCustomerCandidate } from "./intent.js";
 import { parsePriceList, readsAsPriceList } from "./priceList.js";
 import { formatBusinessDateTime, parseDateRange } from "./businessDay.js";
 import {
@@ -1482,9 +1482,12 @@ async function runIntent(
         // ever produce an empty bill. If it names someone the seller has
         // billed before, show that person instead. The digit test does the
         // separating: "ravi" looks them up, "ravi 2 chai" bills them.
-        const words = text.trim().split(/\s+/);
-        if (!/\d/.test(text) && words.length <= 3) {
-          const known = await findCustomer(businessId, text.trim());
+        // Strips filler and bill-words, then asks the seller's OWN customer
+        // list whether what remains names anyone. This is what makes
+        // "dude get me bill of ria" work without a pattern for it.
+        const candidate = extractCustomerCandidate(text);
+        if (candidate) {
+          const known = await findCustomer(businessId, candidate);
           if (known) return await handleCustomerHistory(businessId, known.name);
         }
         return await handleOrder(businessId, text, sourceMessageId, incoming.onSlowWork);
