@@ -398,10 +398,39 @@ async function handleAdd(businessId: string, args: string): Promise<Reply> {
   }
 
   if (unreadable.length > 0) {
-    parts.push(
-      `I couldn't find a price for:\n${unreadable.map((f) => `  ${f}`).join("\n")}\n\n` +
-        `Send it as "${unreadable[0]} 100" and I'll save it.`,
-    );
+    // A NAME WITH NO PRICE IS NOT A FAILURE — IT IS A QUESTION.
+    //
+    // "/add paner" came back "I couldn't find a price for: paner", which
+    // is true and useless. The seller already HAS paneer at Rs 100; the
+    // one thing worth saying is exactly that. Checking costs one lookup
+    // against data already loaded.
+    const index = buildCatalogIndex(before);
+    for (const fragment of unreadable) {
+      const existing = findProduct(fragment, index);
+      if (existing && existing !== "ambiguous") {
+        const sameSpelling = existing.product.name.toLowerCase() === fragment.toLowerCase();
+        parts.push(
+          sameSpelling
+            ? `You already have ${titleCase(existing.product.name)} at ${formatRupees(existing.product.price)}.\n\n` +
+              `To change it, send:  ${existing.product.name} 120`
+            : `"${fragment}" \u2014 you already have ${titleCase(existing.product.name)} at ${formatRupees(existing.product.price)}.\n\n` +
+              `Order it however you spell it; the bill will say ${titleCase(existing.product.name)}.\n` +
+              `To change the price, send:  ${existing.product.name} 120`,
+        );
+        continue;
+      }
+
+      // Not in the list. If it looks like a known dish misspelled, offer
+      // the spelling now, BEFORE it is saved wrong and prints on a bill.
+      const spelling = suggestSpelling(fragment);
+      parts.push(
+        spelling
+          ? `I don't have "${fragment}" yet \u2014 did you mean ${titleCase(spelling.suggested)}?\n\n` +
+            `Send it with a price:  ${spelling.suggested} 100`
+          : `I don't have "${fragment}" yet, and I need its price.\n\n` +
+            `Send it as:  ${fragment} 100`,
+      );
+    }
   }
 
   return { text: parts.join("\n\n"), actions: actions.length > 0 ? actions : undefined };
