@@ -26,6 +26,7 @@ import {
 import { buildCatalogIndex, findProduct, CatalogResolutionError } from "./catalog.js";
 import { classifyIntent } from "./intent.js";
 import { parseDiscount } from "./discount.js";
+import { auditPriceList } from "./priceListAudit.js";
 import { parsePriceList, readsAsPriceList } from "./priceList.js";
 import { formatBusinessDateTime, parseDateRange, stripDateExpressions } from "./businessDay.js";
 import {
@@ -1108,16 +1109,76 @@ async function handleSettle(businessId: string, text: string): Promise<Reply> {
   };
 }
 
-async function handlePrices(businessId: string): Promise<string> {
+// The price list, plus anything wrong with it.
+//
+// These checks only ever ran at /add time, so a list built up over weeks —
+// a typo here, a bad parse there, the same item entered twice — was never
+// looked at again. The problems just sat there printing onto customers'
+// bills. Showing the list is the natural moment to surface them.
+async function handlePrices(businessId: string): Promise<Reply> {
   const catalog = await loadCatalog(businessId);
   if (catalog.products.length === 0) {
-    return "Your price list is empty. Add items with:\n  /add paneer 120";
+    return { text: "Your price list is empty. Add items with:\n  /add paneer 120" };
   }
-  const lines = catalog.products
-    .slice()
-    .sort((a, b) => a.name.localeCompare(b.name))
-    .map((p) => `${p.name} — ₹${p.price}`);
-  return `Your prices:\n\n${lines.join("\n")}`;
+
+  const sorted = catalog.products.slice().sort((a, b) => a.name.localeCompare(b.name));
+  const width = Math.max(...sorted.map((p) => titleCase(p.name).length));
+  const rows = sorted.map(
+    (p) => `${titleCase(p.name).padEnd(width)}  ${formatRupees(p.price).padStart(8)}`,
+  );
+
+  const problems = auditPriceList(sorted.map((p) => ({ name: p.name, price: p.price })));
+  const parts = [`<pre>${escapeHtml([`YOUR PRICES`, "", ...rows].join("\n"))}</pre>\n`];
+  const actions: ReplyAction[] = [];
+
+  if (problems.length > 0) {
+    const notes = problems.map((p) => {
+      if (p.kind === "duplicate") {
+        return `  "${p.name}" ${formatRupees(p.price)} and "${p.other}" ${formatRupees(p.otherPrice)} look like the same item`;
+      }
+      if (p.kind === "bad_name") {
+        return `  "${p.name}" looks like a bad entry — did you mean "${p.suggested}"?`;
+      }
+      return `  "${p.name}" → "${p.suggested}"?`;
+    });
+
+    parts.push(
+      escapeHtml(
+        `${problems.length} thing${problems.length === 1 ? "" : "s"} worth fixing — ` +
+          `${problems.length === 1 ? "it prints" : "these print"} on your customers' bills:\n` +
+          notes.join("\n"),
+      ),
+    );
+
+    // At most four, so the keyboard stays readable. The rest surface once
+    // these are dealt with.
+    for (const problem of problems.slice(0, 4)) {
+      if (problem.kind === "duplicate") {
+        // Keep the CORRECTLY SPELLED one. Picking by price was arbitrary
+        // and here it was actively wrong: it offered to keep "panner" over
+        // "paneer". The name is what prints on the customer's bill, so
+        // spelling decides, and price only breaks a tie.
+        const nameIsTypo = suggestSpelling(problem.name) !== null;
+        const otherIsTypo = suggestSpelling(problem.other) !== null;
+        const keep =
+          nameIsTypo !== otherIsTypo
+            ? (nameIsTypo ? problem.other : problem.name)
+            : (problem.price >= problem.otherPrice ? problem.name : problem.other);
+        const drop = keep === problem.name ? problem.other : problem.name;
+        const action = encodeMerge(drop);
+        if (action) actions.push({ label: `🔀 Keep only "${keep}"`, action });
+      } else {
+        const action = encodeFix(problem.name, problem.suggested);
+        if (action) actions.push({ label: `✏️ ${problem.name} → ${problem.suggested}`, action });
+      }
+    }
+  }
+
+  return {
+    text: parts.join("\n"),
+    parseMode: "HTML" as const,
+    actions: actions.length > 0 ? actions : undefined,
+  };
 }
 
 async function handleRemove(businessId: string, args: string): Promise<string> {
@@ -1534,7 +1595,7 @@ const GREETING_REPLY =
 // normal typing is handled by the intent layer — but they stay supported
 // because a seller who learned them shouldn't be broken.
 const KNOWN_COMMANDS = [
-  "/start", "/help", "/add", "/prices", "/list", "/remove",
+  "/start", "/help", "/add", "/prices", "/list", "/items", "/menu", "/rates", "/remove",
   "/zbill", "/plus", "/additem", "/minus", "/removeitem",
   "/bill", "/done", "/sales", "/paid", "/open", "/rename", "/learned", "/forget",
   "/format", "/style", "/shop", "/pdf", "/setup", "/mock",
@@ -1737,7 +1798,7 @@ async function runIntent(
       case "greeting":
         return { text: GREETING_REPLY };
       case "prices":
-        return { text: await handlePrices(businessId) };
+        return await handlePrices(businessId);
       case "sales": {
         // "kitna hua ravi ka" asks about a PERSON, not the shop's day.
         // The words overlap ("kitna" means both), so the seller's own
@@ -2090,7 +2151,10 @@ async function runCommand(
         return await handleAdd(businessId, args);
       case "/prices":
       case "/list":
-        return { text: await handlePrices(businessId) };
+      case "/items":
+      case "/menu":
+      case "/rates":
+        return await handlePrices(businessId);
       case "/remove":
         return { text: await handleRemove(businessId, args) };
       case "/rename":
