@@ -220,6 +220,9 @@ export interface CustomerBillRow {
 
 export interface CustomerHistory {
   customer: CustomerRow;
+  // Set when the seller asked about a period ("yesterday's bill of
+  // tanishk"). Figures below then describe THAT window, not all time.
+  periodLabel?: string | null;
   bills: CustomerBillRow[];
   // Totals are SUMMED from stored bill figures, never recalculated from
   // line items — the same rule the bill templates follow.
@@ -233,8 +236,8 @@ const HISTORY_PAGE = 10;
 export async function loadCustomerHistory(
   businessId: string,
   customer: CustomerRow,
+  range?: { label: string; from: Date; to: Date } | null,
   limit = HISTORY_PAGE,
-  before?: string,
 ): Promise<CustomerHistory> {
   // Bills are matched by customer_id where one is linked, and fall back to
   // the stored name for bills made before customers existed — otherwise a
@@ -255,18 +258,27 @@ export async function loadCustomerHistory(
     (a, b) => Date.parse(b.created_at) - Date.parse(a.created_at),
   );
 
-  const windowed = before
-    ? all.filter((b) => Date.parse(b.created_at) < Date.parse(before))
+  // A period narrows BOTH the list and the figures, so "yesterday's bills"
+  // reports yesterday's money rather than showing yesterday's rows under an
+  // all-time total — which would be an accounting error, not a display one.
+  const inRange = range
+    ? all.filter((b) => {
+        const at = Date.parse(b.finalized_at ?? b.created_at);
+        return at >= range.from.getTime() && at < range.to.getTime();
+      })
     : all;
 
-  // Lifetime figures count CONFIRMED bills only. A draft is not yet a
-  // transaction, and counting it would overstate what the customer owes.
-  const confirmed = all.filter((b) => b.status === "finalized");
+  const windowed = inRange;
+
+  // Figures count CONFIRMED bills only. A draft is not yet a transaction,
+  // and counting it would overstate what the customer owes.
+  const confirmed = inRange.filter((b) => b.status === "finalized");
   const lifetimeTotal = confirmed.reduce((sum, b) => sum + Number(b.total), 0);
   const paid = confirmed.reduce((sum, b) => sum + Number(b.amount_paid), 0);
 
   return {
     customer,
+    periodLabel: range?.label ?? null,
     bills: windowed.slice(0, limit),
     billCount: confirmed.length,
     lifetimeTotal: Math.round(lifetimeTotal * 100) / 100,

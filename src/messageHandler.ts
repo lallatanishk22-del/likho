@@ -26,7 +26,7 @@ import {
 import { buildCatalogIndex, findProduct, CatalogResolutionError } from "./catalog.js";
 import { classifyIntent, extractCustomerCandidate } from "./intent.js";
 import { parsePriceList, readsAsPriceList } from "./priceList.js";
-import { formatBusinessDateTime, parseDateRange } from "./businessDay.js";
+import { formatBusinessDateTime, parseDateRange, stripDateExpressions } from "./businessDay.js";
 import {
   loadBusinessProfile, setBillTemplate, setBusinessField, isEditableField, EDITABLE_FIELDS,
   loadOnboarding, setOnboardingStep, setBusinessKind, type OnboardingState,
@@ -747,7 +747,11 @@ function billLine(bill: {
   return `#${bill.bill_no}  ${when}\n   ${money}${mark}`;
 }
 
-async function handleCustomerHistory(businessId: string, name: string): Promise<Reply> {
+async function handleCustomerHistory(
+  businessId: string,
+  name: string,
+  range?: { label: string; from: Date; to: Date } | null,
+): Promise<Reply> {
   const customer = await findCustomer(businessId, name);
   if (!customer) {
     return {
@@ -757,15 +761,25 @@ async function handleCustomerHistory(businessId: string, name: string): Promise<
     };
   }
 
-  const history = await loadCustomerHistory(businessId, customer);
+  const history = await loadCustomerHistory(businessId, customer, range);
   if (history.bills.length === 0) {
-    return { text: `${titleCase(customer.name)} has no bills yet.` };
+    return {
+      text: range
+        ? `${titleCase(customer.name)} has no bills ${range.label.toLowerCase() === "today" || range.label.toLowerCase() === "yesterday" ? range.label.toLowerCase() : `in ${range.label.toLowerCase()}`}.`
+        : `${titleCase(customer.name)} has no bills yet.`,
+    };
   }
 
-  const head = [`${titleCase(customer.name)}`, ""];
+  const head = [
+    range ? `${titleCase(customer.name)} · ${range.label}` : titleCase(customer.name),
+    "",
+  ];
   if (history.billCount > 0) {
     head.push(
-      `${history.billCount} bill${history.billCount === 1 ? "" : "s"} · ${formatRupees(history.lifetimeTotal)} lifetime` +
+      // "lifetime" is only true when no period was asked for. Filtered to
+      // yesterday, the figure describes yesterday and saying otherwise
+      // would misreport money.
+      `${history.billCount} bill${history.billCount === 1 ? "" : "s"} · ${formatRupees(history.lifetimeTotal)}${range ? "" : " lifetime"}` +
         (history.outstanding > 0 ? `\n${formatRupees(history.outstanding)} still owed` : " · all paid"),
       "",
     );
@@ -1485,10 +1499,16 @@ async function runIntent(
         // Strips filler and bill-words, then asks the seller's OWN customer
         // list whether what remains names anyone. This is what makes
         // "dude get me bill of ria" work without a pattern for it.
-        const candidate = extractCustomerCandidate(text);
+        // The date is removed BEFORE the name is extracted, because a date
+        // carries digits and a digit is what tells an order from a
+        // question. Stripping it means "tanishk bills 10 sept" reads as a
+        // name plus a date, while "ria 2 chai today" keeps its 2 and stays
+        // an order.
+        const range = parseDateRange(text);
+        const candidate = extractCustomerCandidate(stripDateExpressions(text));
         if (candidate) {
           const known = await findCustomer(businessId, candidate);
-          if (known) return await handleCustomerHistory(businessId, known.name);
+          if (known) return await handleCustomerHistory(businessId, known.name, range);
         }
         return await handleOrder(businessId, text, sourceMessageId, incoming.onSlowWork);
       }

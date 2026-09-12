@@ -377,6 +377,15 @@ const NOT_PART_OF_A_NAME = new Set([
   "bill", "bills", "order", "orders", "history", "khata", "account",
   "invoice", "invoices", "receipt", "receipts", "detail", "details",
   "previous", "past", "old", "last", "recent", "all", "any",
+  // Time words. They are stripped from the NAME but still read from the
+  // original message as a date filter, so "yesterday bill of tanishk"
+  // resolves to Tanishk AND to yesterday.
+  "yesterday", "today", "tomorrow", "kal", "aaj", "week", "weeks", "month",
+  "months", "day", "days", "year", "night", "morning", "evening", "this",
+  "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "sept",
+  "oct", "nov", "dec", "january", "february", "march", "april", "june",
+  "july", "august", "september", "october", "november", "december",
+  "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
 ]);
 
 // Returns the part of the message that could be a person's name, or null.

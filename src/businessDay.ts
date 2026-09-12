@@ -125,7 +125,10 @@ export function parseDateRange(
   if (/\b(today|aaj)\b/.test(lower)) {
     return dayRange(todayStart, "Today", tz);
   }
-  if (/\b(this|is)\s+(week|hafte|hafta)\b/.test(lower) || /\blast\s+7\s+days\b/.test(lower)) {
+  if (
+    /\b(this|last|past|is|pichle)\s+(week|hafte|hafta)\b/.test(lower) ||
+    /\blast\s+7\s+days\b/.test(lower)
+  ) {
     return { label: "Last 7 days", from: addDays(todayStart, -6, tz), to: addDays(todayStart, 1, tz) };
   }
   if (/\b(this|is)\s+(month|mahine|mahina)\b/.test(lower)) {
@@ -191,4 +194,29 @@ export function parseDateRange(
   }
 
   return null;
+}
+
+// Removes date expressions from a message, so the rest can be judged on its
+// own. Needed because a date contains digits ("10 sept", "8/9") and a digit
+// is otherwise the signal that a message is an ORDER carrying a quantity.
+//
+// Stripping the date first means "tanishk bills 10 sept" is understood as a
+// name plus a date, while "ria 2 chai today" keeps its 2 and stays an order.
+// The digit rule is not relaxed — the date simply stops counting as one.
+export function stripDateExpressions(text: string): string {
+  return text
+    .replace(/\b\d{1,2}\s*[/-]\s*\d{1,2}(?:\s*[/-]\s*\d{2,4})?\b/gi, " ")
+    .replace(
+      /\b\d{1,2}\s*(?:st|nd|rd|th)?\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\b/gi,
+      " ",
+    )
+    .replace(
+      /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s+\d{1,2}\s*(?:st|nd|rd|th)?\b/gi,
+      " ",
+    )
+    .replace(/\blast\s+\d+\s+days?\b/gi, " ")
+    .replace(/\b(yesterday|today|tomorrow|kal|aaj)\b/gi, " ")
+    .replace(/\b(this|last|past|pichle)\s+(week|month|year|hafte|hafta|mahine|mahina)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
