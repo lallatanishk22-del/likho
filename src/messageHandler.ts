@@ -27,6 +27,9 @@ import { buildCatalogIndex, findProduct, CatalogResolutionError } from "./catalo
 import { classifyIntent } from "./intent.js";
 import { parseDiscount } from "./discount.js";
 import { auditPriceList } from "./priceListAudit.js";
+import {
+  setPendingChoice, clearPendingChoice, resolvePendingChoice, type ChoiceOption,
+} from "./pendingChoice.js";
 import { parsePriceList, readsAsPriceList } from "./priceList.js";
 import { formatBusinessDateTime, parseDateRange, stripDateExpressions } from "./businessDay.js";
 import {
@@ -83,6 +86,9 @@ export interface ReplyDocument {
 
 export interface Reply {
   text: string;
+  // The options this reply is asking the seller to pick between. Stored so
+  // the answer can be TYPED as well as tapped — see pendingChoice.ts.
+  choices?: ChoiceOption[];
   // "HTML" lets a reply use <pre>, which is the only way Telegram will
   // render a text table in a fixed-width font.
   parseMode?: "HTML";
@@ -310,6 +316,7 @@ async function handleAdd(businessId: string, args: string): Promise<Reply> {
 
   const parts: string[] = [];
   const actions: ReplyAction[] = [];
+  const choices: ChoiceOption[] = [];
 
   if (created.length > 0) {
     parts.push(
@@ -366,8 +373,14 @@ async function handleAdd(businessId: string, args: string): Promise<Reply> {
 
     const keepAdded = encodeMerge(d.existing);
     const keepExisting = encodeMerge(d.added);
-    if (keepAdded) actions.push({ label: `Keep "${d.added}"`, action: keepAdded });
-    if (keepExisting) actions.push({ label: `Keep "${d.existing}"`, action: keepExisting });
+    if (keepAdded) {
+      actions.push({ label: `Keep "${d.added}"`, action: keepAdded });
+      choices.push({ label: `Keep "${d.added}"`, action: keepAdded, value: d.added });
+    }
+    if (keepExisting) {
+      actions.push({ label: `Keep "${d.existing}"`, action: keepExisting });
+      choices.push({ label: `Keep "${d.existing}"`, action: keepExisting, value: d.existing });
+    }
   }
 
   // Flag likely misspellings, but SAVE WHAT WAS TYPED. The name goes on
@@ -433,7 +446,11 @@ async function handleAdd(businessId: string, args: string): Promise<Reply> {
     }
   }
 
-  return { text: parts.join("\n\n"), actions: actions.length > 0 ? actions : undefined };
+  return {
+    text: parts.join("\n\n"),
+    actions: actions.length > 0 ? actions : undefined,
+    choices: choices.length > 0 ? choices : undefined,
+  };
 }
 
 // Renaming keeps the product's id, so bills that already used it stay
@@ -1821,6 +1838,25 @@ export async function handleIncoming(incoming: IncomingMessage): Promise<Reply> 
   const isCommand = commands.length > 1 || (commands[0] && commands[0].command !== "");
 
   if (!isCommand) {
+    // ANSWERING THE LAST QUESTION.
+    //
+    // Checked before onboarding and before intent routing, because a reply
+    // to a question Likho just asked is not a new request. It returns null
+    // whenever the message does not identify an option, so nothing is ever
+    // blocked behind a question — and an order-shaped message is refused
+    // outright, so billing can never be swallowed by a stale prompt.
+    // The catch guards the LOOKUP ONLY. Wrapping the action too meant a
+    // failure inside it was swallowed and the message fell through to the
+    // order parser, which looked exactly like the answer not being
+    // understood — and hid the real error completely.
+    let answered: ChoiceOption | null = null;
+    try {
+      answered = await resolvePendingChoice(businessId, trimmed);
+    } catch {
+      // A failed lookup must never stop a message being handled normally.
+    }
+    if (answered) return await handleAction(incoming, answered.action);
+
     try {
       const onboarding = await loadOnboarding(businessId);
       if (onboarding.step !== "done") {
@@ -1837,16 +1873,32 @@ export async function handleIncoming(incoming: IncomingMessage): Promise<Reply> 
     for (const c of commands) {
       replies.push(await runCommand(businessId, incoming, c.command, c.args, trimmed, sourceMessageId));
     }
-    if (replies.length === 1) return replies[0]!;
-    return {
+    if (replies.length === 1) return remember(businessId, replies[0]!);
+    const last = replies[replies.length - 1]!;
+    return remember(businessId, {
       text: replies.map((r) => r.text).join("\n\n———\n\n"),
       // Actions from the LAST reply — that's the state the seller ends on.
-      actions: replies[replies.length - 1]!.actions,
-    };
+      actions: last.actions,
+      choices: last.choices,
+    });
   }
 
   // No command: the conversation layer decides.
-  return runIntent(businessId, incoming, trimmed, sourceMessageId);
+  return remember(businessId, await runIntent(businessId, incoming, trimmed, sourceMessageId));
+}
+
+// Stores the options a reply offered, so the seller can answer in words.
+// A reply that asks nothing CLEARS the stored question — otherwise an
+// answer typed much later would attach to a prompt long since moved on
+// from.
+async function remember(businessId: string, reply: Reply): Promise<Reply> {
+  try {
+    if (reply.choices?.length) await setPendingChoice(businessId, reply.choices);
+    else await clearPendingChoice(businessId);
+  } catch {
+    // Never let bookkeeping swallow a reply the seller is waiting on.
+  }
+  return reply;
 }
 
 // Natural-language dispatch. This is what makes commands optional.
