@@ -70,6 +70,7 @@ export type IntentName =
   | "payment"
   | "pdf"
   | "correction"
+  | "keep_only"
   | "rename"
   | "bill_format"
   | "mock"
@@ -402,6 +403,14 @@ function classifyIntentInner(rawText: string): Intent {
   const forgetMatch = text.match(/^forget\s+(.+)$/i);
   if (forgetMatch) {
     return { ...base, name: "forget", text: forgetMatch[1]!.trim() };
+  }
+
+  // Answering the duplicate question in words rather than by tapping.
+  // "keep only cake" was reaching the ORDER parser, which replied
+  // "Quantity for cake (1) isn't clearly supported".
+  const keepMatch = text.match(/^keep\s+(?:only\s+|just\s+)?(.+?)\s*$/i);
+  if (keepMatch && !/\d/.test(keepMatch[1]!)) {
+    return { ...base, name: "keep_only", text: keepMatch[1]!.replace(/^["']|["']$/g, "").trim() };
   }
 
   // Renaming a product in the price list. Checked before the edit patterns

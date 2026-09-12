@@ -354,25 +354,25 @@ async function handleAdd(businessId: string, args: string): Promise<Reply> {
   const duplicateNames = new Set(duplicates.map((d) => d.added.toLowerCase()));
 
   for (const d of duplicates) {
-    const action = encodeMerge(d.existing);
+    // BOTH names get a button. Offering only one is not a choice — the
+    // seller was shown "Keep only caku" with no way to keep "cake", which
+    // was very likely the answer they wanted.
     parts.push(
       `You already have "${d.existing}" at ${formatRupees(d.existingPrice)}, ` +
         `which looks like the same thing as "${d.added}".\n\n` +
-        `If they are different items, keep both. If not, two names means ` +
-        `your sales get split across them, and a misspelled order can't be ` +
-        `priced — I won't guess which one you meant.` +
-        (action
-          ? `\nTap to drop "${d.existing}" and keep "${d.added}".`
-          : `\n\nTo drop the old one:  /remove ${d.existing}`),
+        `Different items? Keep both. Otherwise pick one — two names split ` +
+        `your sales, and a misspelled order can't be priced.`,
     );
-    if (action) {
-      actions.push({ label: `\u{1f500} Keep only "${d.added}"`, action });
-    }
+
+    const keepAdded = encodeMerge(d.existing);
+    const keepExisting = encodeMerge(d.added);
+    if (keepAdded) actions.push({ label: `Keep "${d.added}"`, action: keepAdded });
+    if (keepExisting) actions.push({ label: `Keep "${d.existing}"`, action: keepExisting });
   }
 
   // Flag likely misspellings, but SAVE WHAT WAS TYPED. The name goes on
   // every bill the customer sees, so a typo here is permanent and worth
-  // catching - but it is the seller's menu, and a shop genuinely called
+  // catching — but it is the seller's menu, and a shop genuinely called
   // "Panner Corner" must not be overruled by a spellchecker.
   const suggestions = created
     .map((e) => suggestSpelling(e.name))
@@ -1144,6 +1144,45 @@ async function handleSettle(businessId: string, text: string): Promise<Reply> {
 // a typo here, a bad parse there, the same item entered twice — was never
 // looked at again. The problems just sat there printing onto customers'
 // bills. Showing the list is the natural moment to surface them.
+// "keep only cake", typed rather than tapped.
+//
+// The bot asked which of two names to keep, then could not understand the
+// answer in words — "keep only cake" went to the ORDER parser and came
+// back "Quantity for cake (1) isn't clearly supported". Asking a question
+// you cannot hear the answer to is worse than not asking.
+async function handleKeepOnly(businessId: string, name: string): Promise<Reply> {
+  const wanted = name.trim();
+  if (wanted.length === 0) return { text: 'Keep which one? Say: keep only cake' };
+
+  const catalog = await loadCatalog(businessId);
+  const index = buildCatalogIndex(catalog);
+  const found = findProduct(wanted, index);
+  if (!found || found === "ambiguous") {
+    return { text: `I don't have "${wanted}" in your price list.` };
+  }
+  const keep = found.product;
+
+  // Everything that looks like the same item, except the one being kept.
+  const rivals = catalog.products.filter(
+    (p) =>
+      p.id !== keep.id &&
+      findNearDuplicate(p.name, [{ name: keep.name, price: keep.price }]) !== null,
+  );
+
+  if (rivals.length === 0) {
+    return { text: `${titleCase(keep.name)} at ${formatRupees(keep.price)} — nothing else looks like it.` };
+  }
+
+  for (const rival of rivals) await deactivateProduct(businessId, rival.name);
+
+  return {
+    text:
+      `Kept ${titleCase(keep.name)} at ${formatRupees(keep.price)}.\n` +
+      `Dropped ${rivals.map((r) => `"${r.name}"`).join(", ")}.\n\n` +
+      `Past bills keep the name and price they were made with.`,
+  };
+}
+
 async function handlePrices(businessId: string): Promise<Reply> {
   const catalog = await loadCatalog(businessId);
   if (catalog.products.length === 0) {
@@ -1183,19 +1222,20 @@ async function handlePrices(businessId: string): Promise<Reply> {
     // these are dealt with.
     for (const problem of problems.slice(0, 4)) {
       if (problem.kind === "duplicate") {
-        // Keep the CORRECTLY SPELLED one. Picking by price was arbitrary
-        // and here it was actively wrong: it offered to keep "panner" over
-        // "paneer". The name is what prints on the customer's bill, so
-        // spelling decides, and price only breaks a tie.
+        // BOTH names get a button, better-spelled one first. Offering only
+        // one is not a choice, and the seller may well want the other.
         const nameIsTypo = suggestSpelling(problem.name) !== null;
         const otherIsTypo = suggestSpelling(problem.other) !== null;
-        const keep =
+        const first =
           nameIsTypo !== otherIsTypo
             ? (nameIsTypo ? problem.other : problem.name)
             : (problem.price >= problem.otherPrice ? problem.name : problem.other);
-        const drop = keep === problem.name ? problem.other : problem.name;
-        const action = encodeMerge(drop);
-        if (action) actions.push({ label: `🔀 Keep only "${keep}"`, action });
+        const second = first === problem.name ? problem.other : problem.name;
+
+        const keepFirst = encodeMerge(second);
+        const keepSecond = encodeMerge(first);
+        if (keepFirst) actions.push({ label: `Keep "${first}"`, action: keepFirst });
+        if (keepSecond) actions.push({ label: `Keep "${second}"`, action: keepSecond });
       } else {
         const action = encodeFix(problem.name, problem.suggested);
         if (action) actions.push({ label: `✏️ ${problem.name} → ${problem.suggested}`, action });
@@ -1913,6 +1953,8 @@ async function runIntent(
         return await handleLearned(businessId);
       case "forget":
         return await handleForget(businessId, intent.text);
+      case "keep_only":
+        return await handleKeepOnly(businessId, intent.text);
       case "rename":
         return await handleRename(businessId, intent.text);
       case "add_item":
