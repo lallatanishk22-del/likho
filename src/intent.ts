@@ -12,6 +12,52 @@
 // whether something is an order at all. A model that misclassifies "Ravi
 // paid 500" as an order would invent a bill for 500 rupees of nothing.
 
+// THE RULE ORDER, AND WHY IT IS WHAT IT IS
+//
+// This layer decides which financial operation runs, so it is deliberately
+// deterministic: no model, one pass, first match wins. That makes ORDERING
+// the whole design, and ordering is invisible unless it is written down.
+// It is written down here.
+//
+//   0. ORDER SHAPE          a quantity before a product beats every
+//                           keyword below. A customer may be called Sales;
+//                           a seller may say "paid" in the same sentence
+//                           as an order. See looksLikeOrderShape().
+//
+//   1. QUESTION GUARD       an interrogative can never reach an intent
+//                           that changes state. Checking your records must
+//                           not change them. See isQuestion().
+//
+//   then, first match wins:
+//
+//   help, setup, greeting   cheap exits, no money involved
+//   settle_customer         before payment: "cleared all dues" is not the
+//                           single-bill payment path
+//   outstanding             before payment: "who hasn't paid" contains
+//                           "paid" and was marking bills PAID IN FULL
+//   payment
+//   mock, bill_format,      presentation; before pdf so "bill format" is
+//   business_info           not read as an export
+//   customer_statement      before pdf: a PDF over a SPAN is a statement
+//   pdf
+//   correction              before add_item: "make it 4 naan" edits
+//   learned, forget, rename
+//   set_customer
+//   add_item, remove_item   before the reads: they carry quantities
+//   open_bills              before sales AND show_bill: "open bills" is
+//                           neither a report nor one bill
+//   sales, prices
+//   show_bill, confirm
+//   customer_history        LAST of the reads: an earlier, greedier
+//                           version swallowed "show bill" and "open bills"
+//   order                   the default. Anything unclaimed is billable,
+//                           and the handler then scans for a customer name
+//                           before committing to that.
+//
+// Every line above exists because something broke. Moving one moves money.
+
+import { stripDateExpressions } from "./businessDay.js";
+
 export type IntentName =
   | "help"
   | "setup"
@@ -144,8 +190,66 @@ export function isQuestion(text: string): boolean {
   );
 }
 
+// --- THE PRECEDENCE RULE THIS LAYER WAS MISSING --------------------------
+//
+// 26 keyword rules ran before the order check, so any message whose words
+// happened to collide with a keyword was stolen from billing:
+//
+//   "sales 2 chai"                 -> the sales report   (order lost)
+//   "paid 2 paneer"                -> a PAYMENT of Rs 2  (money bug)
+//   "ravi 2 chai and mark it paid" -> a payment          (order lost)
+//
+// The last is not exotic: noting that an order was paid, in the same
+// breath as the order, is how people talk.
+//
+// In a billing product a QUANTITY BEFORE A PRODUCT is the strongest signal
+// there is, and it beats every keyword. A customer may be called Sales; a
+// seller may say "paid" in the same sentence as an order. Neither changes
+// what the message IS.
+//
+// Excluded deliberately: messages that OPEN with an action verb ("add 2
+// samosa", "make it 4 naan") are editing an existing bill, and questions,
+// which never act at all.
+const ACTION_OPENERS =
+  /^(add|plus|remove|minus|delete|cancel|drop|confirm|mark|set|rename|forget|make|change|update|show|open|give|send|get|bring|shop|business|settle|clear)\b/i;
+
+// A bill reference (#1042) is not a quantity.
+const QUANTITY_BEFORE_WORD = /(^|[^#\d])\b(\d{1,3})\s+([a-z]{2,})/i;
+
+// Words that make the number a price or a unit, not a count of something.
+const NOT_A_PRODUCT_AFTER_NUMBER =
+  /^(rs|rupees|rupee|each|only|percent|off|paid|due|bill|bills|more|less|total|ka|ki|ke|se|me|and|aur)$/i;
+
+export function looksLikeOrderShape(text: string): boolean {
+  // "sales 8 sep" is a date, not eight sepsomethings. Dates are stripped
+  // first, exactly as they are before a customer-name lookup.
+  const t = stripDateExpressions(text).trim();
+  if (t.length === 0) return false;
+  if (isQuestion(t)) return false;
+  if (ACTION_OPENERS.test(t)) return false;
+
+  const m = t.match(QUANTITY_BEFORE_WORD);
+  if (!m) return false;
+  return !NOT_A_PRODUCT_AFTER_NUMBER.test(m[3]!);
+}
+
 export function classifyIntent(rawText: string): Intent {
   const asked = isQuestion(rawText);
+
+  // Order shape wins over every keyword. See the note above.
+  if (looksLikeOrderShape(rawText)) {
+    const shaped = classifyIntentInner(rawText);
+    // Only intents that would STEAL the order are overridden; genuine
+    // bill-editing intents ("add 2 chai") never reach here anyway.
+    const STEALABLE = new Set<IntentName>([
+      "sales", "payment", "prices", "outstanding", "settle_customer",
+      "customer_history", "customer_statement", "show_bill", "confirm",
+      "open_bills", "pdf", "mock", "learned",
+    ]);
+    if (STEALABLE.has(shaped.name)) return { ...shaped, name: "order" };
+    return shaped;
+  }
+
   const decided = classifyIntentInner(rawText);
 
   // A question is answered, never acted on. Confirming, paying and
