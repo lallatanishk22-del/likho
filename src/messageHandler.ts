@@ -24,7 +24,7 @@ import {
   type StoredBill,
 } from "./billStore.js";
 import { buildCatalogIndex, findProduct, CatalogResolutionError } from "./catalog.js";
-import { classifyIntent, extractCustomerCandidate } from "./intent.js";
+import { classifyIntent } from "./intent.js";
 import { parsePriceList, readsAsPriceList } from "./priceList.js";
 import { formatBusinessDateTime, parseDateRange, stripDateExpressions } from "./businessDay.js";
 import {
@@ -38,7 +38,8 @@ import {
   skippedMessage, SKIP_ACTION, FORMAT_ACTION, SHOP_ACTION, type BusinessKind,
 } from "./onboarding.js";
 import {
-  CustomerAmbiguousError, findCustomer, loadCustomerHistory, listOutstanding,
+  CustomerAmbiguousError, findCustomer, findCustomerInMessage,
+  loadCustomerHistory, listOutstanding,
 } from "./customerStore.js";
 import { toBillData } from "./billRender.js";
 import { renderBill } from "./templates/index.js";
@@ -1439,8 +1440,19 @@ async function runIntent(
         return { text: GREETING_REPLY };
       case "prices":
         return { text: await handlePrices(businessId) };
-      case "sales":
+      case "sales": {
+        // "kitna hua ravi ka" asks about a PERSON, not the shop's day.
+        // The words overlap ("kitna" means both), so the seller's own
+        // customer list breaks the tie: if the message names someone, it
+        // is a question about them.
+        if (!/\d/.test(stripDateExpressions(text))) {
+          const named = await findCustomerInMessage(businessId, stripDateExpressions(text));
+          if (named && named !== "ambiguous") {
+            return await handleCustomerHistory(businessId, named.name, parseDateRange(text));
+          }
+        }
         return await handleSales(businessId, text);
+      }
       case "open_bills":
         return await handleOpenBills(businessId);
       case "show_bill": {
@@ -1504,11 +1516,22 @@ async function runIntent(
         // question. Stripping it means "tanishk bills 10 sept" reads as a
         // name plus a date, while "ria 2 chai today" keeps its 2 and stays
         // an order.
+        // The date is removed first: a date carries digits, and a digit is
+        // what tells an order from a question about one. The digit rule
+        // itself is never relaxed.
         const range = parseDateRange(text);
-        const candidate = extractCustomerCandidate(stripDateExpressions(text));
-        if (candidate) {
-          const known = await findCustomer(businessId, candidate);
-          if (known) return await handleCustomerHistory(businessId, known.name, range);
+        const withoutDate = stripDateExpressions(text);
+
+        // No quantity anywhere means this cannot be an order, so it is
+        // safe to ask whether the message NAMES anyone. Scanning for a
+        // known customer needs no list of English filler words — which is
+        // what the two previous attempts got wrong.
+        if (!/\d/.test(withoutDate)) {
+          const named = await findCustomerInMessage(businessId, withoutDate);
+          if (named === "ambiguous") {
+            return { text: "That names more than one customer. Which one did you mean?" };
+          }
+          if (named) return await handleCustomerHistory(businessId, named.name, range);
         }
         return await handleOrder(businessId, text, sourceMessageId, incoming.onSlowWork);
       }

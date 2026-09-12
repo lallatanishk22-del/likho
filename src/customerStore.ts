@@ -310,3 +310,55 @@ export async function listOutstanding(
 
   return [...byName.values()].sort((a, b) => b.outstanding - a.outstanding);
 }
+
+// --- Finding a customer named anywhere in a message ----------------------
+//
+// Two attempts at this failed the same way. Both tried to work out which
+// words were FILLER and treat the remainder as a name:
+//
+//   "dude get me bill of ria"          -> needed "dude", "get", "of"
+//   "bring me yesterday bill of tanishk" -> needed "yesterday"
+//   "can you get me bills total of ravi" -> needed "total"
+//
+// Each fix added words to a list and waited for the next word nobody
+// thought of. English has no end of them, so the list can never be
+// finished — the approach was wrong, not incomplete.
+//
+// This inverts it. The seller's customer list is GROUND TRUTH and it is
+// small, so instead of asking "which words are filler?" it asks "does any
+// word here name someone I know?" No vocabulary of English is required,
+// and a phrasing nobody has imagined yet works the first time.
+export async function findCustomerInMessage(
+  businessId: string,
+  text: string,
+): Promise<CustomerRow | "ambiguous" | null> {
+  const words = text
+    .toLowerCase()
+    .replace(/[^\p{L}\s'’]/gu, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 0);
+  if (words.length === 0) return null;
+
+  const customers = await listCustomers(businessId);
+  if (customers.length === 0) return null;
+
+  // Windows of 3, then 2, then 1 word: a full name must beat the first name
+  // inside it, so "ria bhanushali" is never resolved as whoever "ria" is.
+  const found = new Map<string, CustomerRow>();
+  for (const size of [3, 2, 1]) {
+    for (let i = 0; i + size <= words.length; i++) {
+      const phrase = words.slice(i, i + size).join(" ");
+      const match = resolveCustomer(customers, phrase);
+      if (match.kind === "found") found.set(match.customer.id, match.customer);
+    }
+    // Stop at the longest window that matched anything: a 2-word hit and
+    // the 1-word hit inside it are the same person, not two candidates.
+    if (found.size > 0) break;
+  }
+
+  if (found.size === 0) return null;
+  // Two genuinely different people named in one message is a question this
+  // cannot answer, so it asks rather than picking.
+  if (found.size > 1) return "ambiguous";
+  return [...found.values()][0]!;
+}

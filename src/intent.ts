@@ -342,76 +342,8 @@ export function classifyIntent(rawText: string): Intent {
   return { ...base, name: "order" };
 }
 
-// --- Naming a customer, however it is phrased ----------------------------
-//
-// The first version matched PHRASINGS: "ravi's bills", "history of ravi".
-// Real usage looked nothing like that. "dude get me bill of ria", "bill of
-// ria", "ria bill", "what about ravi", "ravi ka bill" all fell through to
-// the order parser, which then asked which items were on the order — a
-// question with no answer, in a loop.
-//
-// Matching phrasings is whack-a-mole; there is always another way to say
-// it. So this asks a STRUCTURAL question instead:
-//
-//   Does this message contain no items, and does what is left name someone?
-//
-// Filler and bill-words are stripped, and whatever remains is handed to the
-// caller to look up against the seller's real customer list. If nobody by
-// that name exists it falls through to the order parser exactly as before,
-// so this can only ever add understanding, never take any away.
-
-// Words that carry no identity: politeness, verbs of asking, and the
-// bill-words themselves.
-const NOT_PART_OF_A_NAME = new Set([
-  // address / filler
-  "dude", "bhai", "bhaiya", "boss", "sir", "yaar", "man", "ok", "okay", "hey",
-  "please", "pls", "plz", "kindly",
-  // asking
-  "get", "me", "show", "give", "send", "fetch", "find", "bring", "pull",
-  "can", "you", "u", "could", "would", "will", "do", "does", "did",
-  "i", "want", "need", "check", "chk", "tell", "know", "let", "see", "look",
-  "what", "whats", "about", "regarding", "for", "of", "the", "a", "an",
-  "my", "his", "her", "their", "is", "was", "are", "and",
-  "dekh", "dikha", "batao", "bata", "chahiye", "ka", "ki", "ke", "wala", "wali",
-  // bill-words
-  "bill", "bills", "order", "orders", "history", "khata", "account",
-  "invoice", "invoices", "receipt", "receipts", "detail", "details",
-  "previous", "past", "old", "last", "recent", "all", "any",
-  // Time words. They are stripped from the NAME but still read from the
-  // original message as a date filter, so "yesterday bill of tanishk"
-  // resolves to Tanishk AND to yesterday.
-  "yesterday", "today", "tomorrow", "kal", "aaj", "week", "weeks", "month",
-  "months", "day", "days", "year", "night", "morning", "evening", "this",
-  "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "sept",
-  "oct", "nov", "dec", "january", "february", "march", "april", "june",
-  "july", "august", "september", "october", "november", "december",
-  "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
-]);
-
-// Returns the part of the message that could be a person's name, or null.
-// Deliberately returns a CANDIDATE, not a decision: only the caller can
-// know whether the seller has actually billed anyone by that name.
-export function extractCustomerCandidate(text: string): string | null {
-  // A message with a quantity in it is an order, not a question about one.
-  if (/\d/.test(text)) return null;
-
-  const words = text
-    .toLowerCase()
-    .replace(/[^\p{L}\s'’]/gu, " ")
-    .split(/\s+/)
-    .filter((w) => w.length > 0);
-
-  if (words.length === 0 || words.length > 8) return null;
-
-  // The possessive is dropped from the NAME too, not just from the test —
-  // "ria's" must be looked up as "ria".
-  const kept = words
-    .map((w) => w.replace(/['’]s$/, ""))
-    .filter((w) => w.length > 0 && !NOT_PART_OF_A_NAME.has(w));
-  if (kept.length === 0 || kept.length > 3) return null;
-
-  // Every word was filler except one or two — that is a name-shaped
-  // remainder. If it names nobody, the caller falls through to the order
-  // parser and nothing is lost.
-  return kept.join(" ");
-}
+// NOTE: extracting a customer name by stripping filler words used to live
+// here. It was replaced by findCustomerInMessage() in customerStore.ts,
+// which scans the message for names the seller ACTUALLY has rather than
+// trying to enumerate English filler. Keeping both would have left two
+// answers to "who does this message name", and they would have drifted.
