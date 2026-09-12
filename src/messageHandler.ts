@@ -40,6 +40,7 @@ import {
 import {
   CustomerAmbiguousError, findCustomer, findCustomerInMessage,
   loadCustomerHistory, listOutstanding, listCustomers,
+  settleAllForCustomer, pendingSettlement,
 } from "./customerStore.js";
 import { toBillData, toStatementData } from "./billRender.js";
 import { renderBill } from "./templates/index.js";
@@ -1044,6 +1045,36 @@ async function handleStatement(
   }
 }
 
+// Settling a whole account. Money changing across several bills at once
+// gets a tap first — the seller sees exactly which bills and how much
+// before anything is written, the same as a price change or a merge.
+async function handleSettle(businessId: string, text: string): Promise<Reply> {
+  const named = await findCustomerInMessage(businessId, stripDateExpressions(text));
+  if (named === "ambiguous") {
+    return { text: "That names more than one customer. Which one did you mean?" };
+  }
+  if (!named) {
+    return {
+      text:
+        "Whose bills are settled?\n\nSay it with the name:\n  tanishk cleared all his dues",
+    };
+  }
+
+  const pending = await pendingSettlement(businessId, named);
+  if (pending.billNos.length === 0) {
+    return { text: `${titleCase(named.name)} has nothing outstanding — every confirmed bill is paid.` };
+  }
+
+  return {
+    text:
+      `${titleCase(named.name)} has ${pending.billNos.length} unpaid bill` +
+      `${pending.billNos.length === 1 ? "" : "s"}: ` +
+      `${pending.billNos.map((n) => `#${n}`).join(", ")}\n\n` +
+      `Mark all of them paid? That records ${formatRupees(pending.amount)} received.`,
+    actions: [{ label: `✅ Mark ${formatRupees(pending.amount)} paid`, action: `settle:${named.id}` }],
+  };
+}
+
 async function handlePrices(businessId: string): Promise<string> {
   const catalog = await loadCatalog(businessId);
   if (catalog.products.length === 0) {
@@ -1700,7 +1731,7 @@ async function runIntent(
       case "payment":
         return await handlePayment(businessId, intent.billNo, intent.amount, intent.customer);
       case "pdf":
-        return { text: "PDF export isn't ready yet — the bill above is the record for now." };
+        return await handleBillPdf(businessId, intent.billNo);
       case "customer_statement": {
         const named = await findCustomerInMessage(businessId, stripDateExpressions(text));
         if (named === "ambiguous") {
@@ -1711,6 +1742,8 @@ async function runIntent(
       }
       case "customer_history":
         return await handleCustomerHistory(businessId, intent.text);
+      case "settle_customer":
+        return await handleSettle(businessId, text);
       case "outstanding":
         return await handleOutstanding(businessId);
       case "mock":
@@ -1831,6 +1864,28 @@ export async function handleAction(incoming: IncomingMessage, action: string): P
       if (action === SKIP_ACTION) return await handleSkipSetup(businessId);
       if (action === FORMAT_ACTION) return await handleBillFormat(businessId, incoming.onSlowWork);
       return await handleBusinessInfo(businessId, "");
+    } catch (err) {
+      return { text: `Something went wrong: ${(err as Error).message}` };
+    }
+  }
+
+  if (action.startsWith("settle:")) {
+    try {
+      const customers = await listCustomers(businessId);
+      const customer = customers.find((c) => c.id === action.slice(7));
+      if (!customer) return { text: "That customer isn't in your list any more." };
+
+      const done = await settleAllForCustomer(businessId, customer);
+      if (done.billNos.length === 0) {
+        return { text: `${titleCase(customer.name)} already had nothing outstanding.` };
+      }
+      return {
+        text:
+          `${titleCase(customer.name)} settled.\n\n` +
+          `${done.billNos.length} bill${done.billNos.length === 1 ? "" : "s"} marked paid ` +
+          `(${done.billNos.map((n) => `#${n}`).join(", ")})\n` +
+          `${formatRupees(done.amount)} recorded as received.`,
+      };
     } catch (err) {
       return { text: `Something went wrong: ${(err as Error).message}` };
     }

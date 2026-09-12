@@ -137,6 +137,9 @@ export async function toStatementData(
     generatedLabel: formatBusinessDateTime(new Date()),
     lines,
     billCount: history.billCount,
+    draftCount: lines.filter((l) => !l.confirmed).length,
+    draftTotal:
+      Math.round(lines.filter((l) => !l.confirmed).reduce((t, l) => t + l.total, 0) * 100) / 100,
     grandTotal: history.lifetimeTotal,
     paidTotal: Math.round((history.lifetimeTotal - history.outstanding) * 100) / 100,
     outstanding: history.outstanding,

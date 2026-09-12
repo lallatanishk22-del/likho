@@ -366,3 +366,58 @@ export async function findCustomerInMessage(
   if (found.size > 1) return "ambiguous";
   return [...found.values()][0]!;
 }
+
+// Settles every unpaid confirmed bill for one customer.
+//
+// "tanishk cleared all his dues" is a real and common thing for a seller to
+// say, and making them mark six bills one number at a time is how a tool
+// gets abandoned. Drafts are deliberately untouched: a draft is not yet a
+// transaction, so it cannot be paid.
+//
+// Each bill is set to ITS OWN total rather than dividing a lump sum, so the
+// amount recorded against every bill stays exactly what that bill charged.
+export async function settleAllForCustomer(
+  businessId: string,
+  customer: CustomerRow,
+): Promise<{ billNos: number[]; amount: number }> {
+  const history = await loadCustomerHistory(businessId, customer, null, 1000);
+  const unpaid = history.allBills.filter(
+    (b) => b.status === "finalized" && Number(b.amount_paid) < Number(b.total),
+  );
+  if (unpaid.length === 0) return { billNos: [], amount: 0 };
+
+  let amount = 0;
+  for (const bill of unpaid) {
+    amount += Number(bill.total) - Number(bill.amount_paid);
+    await rest(`bill_sessions?id=eq.${bill.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        amount_paid: Number(bill.total),
+        payment_status: "paid",
+        updated_at: new Date().toISOString(),
+      }),
+    });
+  }
+
+  return {
+    billNos: unpaid.map((b) => b.bill_no).sort((a, b) => a - b),
+    amount: Math.round(amount * 100) / 100,
+  };
+}
+
+// What settling WOULD do, without doing it — so the seller sees the amount
+// before confirming.
+export async function pendingSettlement(
+  businessId: string,
+  customer: CustomerRow,
+): Promise<{ billNos: number[]; amount: number }> {
+  const history = await loadCustomerHistory(businessId, customer, null, 1000);
+  const unpaid = history.allBills.filter(
+    (b) => b.status === "finalized" && Number(b.amount_paid) < Number(b.total),
+  );
+  return {
+    billNos: unpaid.map((b) => b.bill_no).sort((a, b) => a - b),
+    amount:
+      Math.round(unpaid.reduce((s, b) => s + Number(b.total) - Number(b.amount_paid), 0) * 100) / 100,
+  };
+}

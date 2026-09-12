@@ -30,6 +30,11 @@ export interface StatementData {
   generatedLabel: string;
   lines: StatementLine[];
   billCount: number;
+  // Drafts are listed but never counted into the figures above. Reported
+  // separately so a statement of nothing but drafts does not read as "Rs 0"
+  // beside two bills worth Rs 1,730 — which looks broken, not empty.
+  draftCount: number;
+  draftTotal: number;
   grandTotal: number;
   paidTotal: number;
   outstanding: number;

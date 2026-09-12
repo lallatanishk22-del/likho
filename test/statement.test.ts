@@ -33,6 +33,8 @@ const STATEMENT: StatementData = {
       amountPaid: 0, paymentStatus: "pending", confirmed: false, itemSummary: "paneer × 1" },
   ],
   billCount: 3,
+  draftCount: 1,
+  draftTotal: 260,
   grandTotal: 580,
   paidTotal: 80,
   outstanding: 500,
@@ -57,7 +59,7 @@ test("a draft is listed but never counted", () => {
   assert.ok(text.includes("Draft"), "draft is not labelled");
   // ...and the sum that INCLUDES it never appears.
   assert.ok(!text.includes("₹840"), "a draft was counted into the total");
-  assert.ok(text.includes("3 bills"), "draft was counted in the bill count");
+  assert.ok(text.includes("3 confirmed bills"), "draft was counted in the bill count");
 });
 
 test("outstanding is stated plainly, since it is why the page exists", () => {
@@ -87,7 +89,8 @@ test("payment state is legible per row", () => {
 test("nothing broken reaches the page", () => {
   for (const data of [
     STATEMENT,
-    { ...STATEMENT, lines: [] , billCount: 0, grandTotal: 0, paidTotal: 0, outstanding: 0 },
+    { ...STATEMENT, lines: [], billCount: 0, draftCount: 0, draftTotal: 0,
+      grandTotal: 0, paidTotal: 0, outstanding: 0 },
     { ...STATEMENT, business: { name: "Anita's Tiffin" } },
   ] as StatementData[]) {
     const text = visibleText(renderStatement(data));
@@ -133,4 +136,40 @@ test("'monthly' and 'weekly' resolve, not just 'this month'", () => {
 
 test("'lifetime' means no period at all", () => {
   assert.equal(parseDateRange("ria lifetime bill", NOW, IST), null);
+});
+
+
+// --- A statement of nothing but drafts must not read as "Rs 0" ----------
+// Reported: two draft bills worth Rs 1,730 listed above a Total of Rs 0.
+// Correct, and it looks broken.
+
+test("drafts are reported even when nothing is confirmed", () => {
+  const draftsOnly: StatementData = {
+    ...STATEMENT,
+    lines: [
+      { billNo: 1009, dateLabel: "10 Sept 2026", timeLabel: "3:26 pm", total: 400,
+        amountPaid: 0, paymentStatus: "pending", confirmed: false, itemSummary: "panner × 2" },
+      { billNo: 1008, dateLabel: "10 Sept 2026", timeLabel: "3:18 pm", total: 1330,
+        amountPaid: 0, paymentStatus: "pending", confirmed: false, itemSummary: "mudpie × 3" },
+    ],
+    billCount: 0, draftCount: 2, draftTotal: 1730,
+    grandTotal: 0, paidTotal: 0, outstanding: 0,
+  };
+  const text = visibleText(renderStatement(draftsOnly));
+  assert.ok(text.includes("2 drafts"), "the draft count is not stated");
+  assert.ok(text.includes("₹1,730"), "the draft total is not stated anywhere");
+  assert.ok(text.includes("not a transaction"), "it does not explain why they are excluded");
+  // ...and they are still excluded from the counted totals.
+  assert.ok(text.includes("0 confirmed bills"));
+});
+
+test("a statement with no drafts says so plainly", () => {
+  const clean: StatementData = {
+    ...STATEMENT,
+    lines: STATEMENT.lines.filter((l) => l.confirmed),
+    draftCount: 0, draftTotal: 0,
+  };
+  const text = visibleText(renderStatement(clean));
+  assert.ok(text.includes("Every bill above is confirmed"));
+  assert.ok(!text.includes("not counted"));
 });

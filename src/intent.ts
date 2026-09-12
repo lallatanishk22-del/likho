@@ -30,6 +30,7 @@ export type IntentName =
   | "customer_history"
   | "customer_statement"
   | "outstanding"
+  | "settle_customer"
   | "business_info"
   | "learned"
   | "forget"
@@ -147,6 +148,31 @@ export function classifyIntent(rawText: string): Intent {
     return { ...base, name: "greeting" };
   }
 
+  // --- Settling someone's account -------------------------------------
+  //
+  // Checked before both payment and the outstanding report. "tanishk
+  // cleared all his dues" is a STATEMENT about a person; it was being
+  // answered with "Nobody owes you anything" because it contains "dues".
+  // And "mark all bills paid by tanishk" reached the single-bill payment
+  // path, which could only ask which number.
+  // Matched on WORD STEMS, not exact spellings. A seller typed "cleard"
+  // and the whole thing fell through to the outstanding report, because
+  // "cleared|clears" did not cover a dropped letter. Sellers type fast;
+  // matching "clear..." and "settl..." costs nothing and survives typos.
+  const SETTLE_VERB = /\b(clear\w*|settl\w*|chukta|chuka|nipta\w*)\b/i;
+  const SETTLE_OBJECT =
+    /\b(due|dues|bill|bills|amount|paisa|paise|udhaar|udhar|baaki|everything|khata|account|sab|sabkuch)\b/i;
+
+  if (
+    (SETTLE_VERB.test(lower) && SETTLE_OBJECT.test(lower)) ||
+    (/\b(all|sab|sare|saare)\b/i.test(lower) &&
+      /\b(bill|bills|due|dues)\b/i.test(lower) &&
+      /\b(paid|clear\w*|settl\w*|mark)\b/i.test(lower)) ||
+    /\bmark\b.*\ball\b.*\b(paid|clear)/i.test(lower)
+  ) {
+    return { ...base, name: "settle_customer" };
+  }
+
   // --- Who owes money --------------------------------------------------
   //
   // Checked BEFORE payment, and this ordering is load-bearing: "who hasn't
@@ -189,6 +215,22 @@ export function classifyIntent(rawText: string): Intent {
   const shopMatch = text.match(/^(?:shop|business|my\s+shop|my\s+business)\s*(.*)$/i);
   if (shopMatch) {
     return { ...base, name: "business_info", text: shopMatch[1]!.trim() };
+  }
+
+  // Asking for the whole account as a document. Checked before plain
+  // history so "lifetime bill of ria" produces a PDF rather than a chat
+  // list — the seller asked for something they can send on.
+  if (
+    /\b(lifetime|life time|statement|ledger|account\s+summary|full\s+(bill|record|history))\b/i.test(lower) ||
+    (/\b(monthly|weekly|yearly)\b/i.test(lower) && /\b(bill|bills|statement|report|summary|total)\b/i.test(lower)) ||
+    // A PDF request is only a STATEMENT when it asks for a SPAN: a period,
+    // "lifetime", or plural "bills". "ravi bill pdf" — singular, no period
+    // — means that one bill, and must stay the single-bill export.
+    (/\b(pdf|print|download)\b/i.test(lower) &&
+      (/\b(bills|statement|ledger|khata|account)\b/i.test(lower) ||
+        /\b(lifetime|life time|monthly|weekly|yearly|today|yesterday|kal|this\s+(week|month|year)|last\s+(week|month|year))\b/i.test(lower)))
+  ) {
+    return { ...base, name: "customer_statement" };
   }
 
   if (hasWord(lower, "pdf", "invoice", "print")) {
@@ -293,17 +335,6 @@ export function classifyIntent(rawText: string): Intent {
     if (!/\d/.test(lower) || billNo !== null) {
       return { ...base, name: "confirm", customer: extractCustomer(text) };
     }
-  }
-
-  // Asking for the whole account as a document. Checked before plain
-  // history so "lifetime bill of ria" produces a PDF rather than a chat
-  // list — the seller asked for something they can send on.
-  if (
-    /\b(lifetime|life time|statement|ledger|account\s+summary|full\s+(bill|record|history))\b/i.test(lower) ||
-    (/\b(monthly|weekly|yearly)\b/i.test(lower) && /\b(bill|bills|statement|report|summary|total)\b/i.test(lower)) ||
-    (/\b(pdf|print|download)\b/i.test(lower) && /\b(bill|bills|statement|history|account|khata)\b/i.test(lower))
-  ) {
-    return { ...base, name: "customer_statement" };
   }
 
   // --- Customer history --------------------------------------------------

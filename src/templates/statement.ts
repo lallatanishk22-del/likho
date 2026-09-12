@@ -37,6 +37,8 @@ const CSS = `
   .tag.paid { color:#555; }
   .tag.draft { color:#999; }
   tfoot td { padding-top:3mm; border-top:2px solid #111; font-weight:700; font-size:11.5pt; }
+  .drafts { margin-top:4mm; padding:3mm 4mm; background:#f6f6f6; border-left:3px solid #999;
+            font-size:9pt; color:#444; line-height:1.5; }
   .foot { margin-top:6mm; padding-top:3mm; border-top:1px solid #ddd;
           display:flex; justify-content:space-between; gap:8mm; font-size:8.5pt; color:#666; }
   .logo { margin-bottom:3mm; }
@@ -59,7 +61,9 @@ export function renderStatement(data: StatementData): string {
   <div class="who">
     <div class="who-label">Account</div>
     <div class="who-name">${esc(data.customerName)}</div>
-    <div class="period">${esc(data.periodLabel)} · ${data.billCount} bill${data.billCount === 1 ? "" : "s"}</div>
+    <div class="period">${esc(data.periodLabel)} · ${data.billCount} confirmed bill${data.billCount === 1 ? "" : "s"}${
+      data.draftCount > 0 ? ` · ${data.draftCount} draft${data.draftCount === 1 ? "" : "s"}` : ""
+    }</div>
   </div>
 
   <div class="cards">
@@ -99,8 +103,14 @@ export function renderStatement(data: StatementData): string {
     </tr></tfoot>
   </table>
 
+  ${data.draftCount > 0 ? `<div class="drafts">
+    ${data.draftCount} draft${data.draftCount === 1 ? "" : "s"} worth ${rupees(data.draftTotal)}
+    ${data.draftCount === 1 ? "is" : "are"} listed below but not counted above \u2014
+    a draft is not a transaction until it is confirmed.
+  </div>` : ""}
+
   <div class="foot">
-    <span>Drafts are shown but not counted in the totals above.</span>
+    <span>${data.draftCount > 0 ? "Drafts are shown but not counted in the totals above." : "Every bill above is confirmed."}</span>
     ${has(data.business.upiId) ? `<span>UPI: ${esc(data.business.upiId)}</span>` : ""}
   </div>`;
 
