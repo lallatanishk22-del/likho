@@ -149,8 +149,16 @@ function renderStoredBill(stored: StoredBill): string {
   }
   summary.push({ left: "TOTAL", right: formatRupees(Number(session.total)) });
 
-  const width = Math.max(...[...rows, ...summary].map((r) => r.left.length)) + 3;
-  const line = (r: { left: string; right: string }) => r.left.padEnd(width) + r.right;
+  // Money is RIGHT-aligned: the amounts must end in one column so they can
+  // be compared by eye. Left-padding the label only made them all START at
+  // the same place, which lines up nothing — Rs 45 and Rs 560 still ended
+  // four characters apart.
+  const all = [...rows, ...summary];
+  const labelW = Math.max(...all.map((r) => r.left.length));
+  const amountW = Math.max(...all.map((r) => r.right.length));
+  const width = labelW + 3 + amountW;
+  const line = (r: { left: string; right: string }) =>
+    r.left.padEnd(labelW + 3) + r.right.padStart(amountW);
 
   const who = session.customer_ref ? `${titleCase(session.customer_ref)} \u2014 ` : "";
   const paid =
@@ -170,11 +178,30 @@ function renderStoredBill(stored: StoredBill): string {
     stamp,
     "",
     ...rows.map(line),
-    "\u2500".repeat(width + 8),
+    "\u2500".repeat(width),
     ...summary.map(line),
     "",
     `Payment: ${paid}`,
   ].join("\n");
+}
+
+// Every reply that shows a bill goes through here.
+//
+// The bill is wrapped in <pre> so Telegram draws it in a FIXED-WIDTH font.
+// The columns were always computed — padEnd has been in renderStoredBill
+// from the start — but the message was sent with no parse_mode, so
+// Telegram drew it proportionally and threw the padding away. "M" is wider
+// than "i", so the money column came out ragged no matter what.
+//
+// A note ("Added chai x 2.") stays OUTSIDE the block: prose in a monospace
+// font is harder to read, and only the table needs the alignment.
+function billReply(stored: StoredBill, note?: string): Reply {
+  const body = `<pre>${escapeHtml(renderStoredBill(stored))}</pre>`;
+  return {
+    text: note ? `${escapeHtml(note)}\n${body}` : body,
+    parseMode: "HTML" as const,
+    actions: billActions(stored),
+  };
 }
 
 // Actions offered alongside a bill. A draft's primary action is Confirm;
@@ -759,19 +786,57 @@ async function handleMock(businessId: string): Promise<Reply> {
 // RULE: reading history NEVER writes. It cannot create a customer, open a
 // draft, or change a total. That is what makes a bare name safe to type.
 
-function billLine(bill: {
+// One bill, as one line, in columns.
+//
+// It used to take TWO lines per bill with nothing aligned, so a list of
+// five bills was ten ragged rows and the amounts could not be compared by
+// eye. Money is right-aligned in a fixed column and the year is dropped —
+// inside a stated period it is the same on every row and only steals width.
+interface HistoryRow {
+  no: string;
+  when: string;
+  amount: string;
+  mark: string;
+}
+
+function historyRow(bill: {
   bill_no: number; total: string | number; amount_paid: string | number;
   payment_status: string; status: string; created_at: string; finalized_at: string | null;
-}): string {
-  const when = formatBusinessDateTime(new Date(bill.finalized_at ?? bill.created_at));
-  const money = formatRupees(Number(bill.total));
+}): HistoryRow {
+  const at = new Date(bill.finalized_at ?? bill.created_at);
+  // "10 Sep" — the year is carried by the heading, not repeated per row.
+  const when = new Intl.DateTimeFormat("en-IN", {
+    timeZone: process.env["LIKHO_TIMEZONE"] ?? "Asia/Kolkata",
+    day: "numeric", month: "short",
+  }).format(at);
+
+  const due = Number(bill.total) - Number(bill.amount_paid);
   const mark =
-    bill.status !== "finalized" ? "  · draft"
-    : bill.payment_status === "paid" ? ""
-    : bill.payment_status === "partial"
-      ? `  · ${formatRupees(Number(bill.total) - Number(bill.amount_paid))} due`
-      : "  · unpaid";
-  return `#${bill.bill_no}  ${when}\n   ${money}${mark}`;
+    bill.status !== "finalized" ? "draft"
+    : bill.payment_status === "paid" ? "paid"
+    : bill.payment_status === "partial" ? `${formatRupees(due)} due`
+    : "unpaid";
+
+  return { no: `#${bill.bill_no}`, when, amount: formatRupees(Number(bill.total)), mark };
+}
+
+// Lays rows out as a monospace block. Telegram draws <pre> in a fixed-width
+// font, which is the only way spaces become a real column — padding a
+// proportional font does nothing, which is why the old list stayed ragged
+// however much it was padded.
+//
+// The summary is laid out by this SAME function, so the totals sit in the
+// same money column as the bills above them instead of drifting.
+function alignedBlock(
+  rows: { left: string; amount: string; right?: string }[],
+): { lines: string[]; width: number } {
+  const leftW = Math.max(...rows.map((r) => r.left.length));
+  const amtW = Math.max(...rows.map((r) => r.amount.length));
+  const lines = rows.map((r) => {
+    const core = `${r.left.padEnd(leftW)}  ${r.amount.padStart(amtW)}`;
+    return r.right ? `${core}  ${r.right}` : core;
+  });
+  return { lines, width: Math.max(...lines.map((l) => l.length)) };
 }
 
 async function handleCustomerHistory(
@@ -797,29 +862,71 @@ async function handleCustomerHistory(
     };
   }
 
-  const head = [
-    range ? `${titleCase(customer.name)} · ${range.label}` : titleCase(customer.name),
-    "",
-  ];
+  const rows = history.bills.map(historyRow);
+
+  // Drafts are counted SEPARATELY and always shown. Previously the whole
+  // summary was skipped when nothing was confirmed, so a customer with two
+  // draft bills saw no total at all — the money was simply invisible.
+  const draftBills = history.allBills.filter((b) => b.status !== "finalized");
+  const draftTotal =
+    Math.round(draftBills.reduce((sum, b) => sum + Number(b.total), 0) * 100) / 100;
+
+  const billRows = rows.map((r) => ({ left: r.no, amount: r.amount, right: r.when + (r.mark ? `  ${r.mark}` : "") }));
+
+  const summaryRows: { left: string; amount: string; right?: string }[] = [];
   if (history.billCount > 0) {
-    head.push(
-      // "lifetime" is only true when no period was asked for. Filtered to
-      // yesterday, the figure describes yesterday and saying otherwise
-      // would misreport money.
-      `${history.billCount} bill${history.billCount === 1 ? "" : "s"} · ${formatRupees(history.lifetimeTotal)}${range ? "" : " lifetime"}` +
-        (history.outstanding > 0 ? `\n${formatRupees(history.outstanding)} still owed` : " · all paid"),
-      "",
-    );
+    summaryRows.push({
+      left: `${history.billCount} bill${history.billCount === 1 ? "" : "s"}`,
+      amount: formatRupees(history.lifetimeTotal),
+    });
+    if (history.outstanding > 0) {
+      summaryRows.push({ left: "unpaid", amount: formatRupees(history.outstanding) });
+    } else {
+      summaryRows.push({ left: "all paid", amount: "" });
+    }
+  }
+  if (draftBills.length > 0) {
+    summaryRows.push({
+      left: `${draftBills.length} draft${draftBills.length === 1 ? "" : "s"}`,
+      amount: formatRupees(draftTotal),
+      right: "not counted",
+    });
   }
 
-  const lines = history.bills.map(billLine);
-  const more = history.billCount > history.bills.length;
+  // The bills align among themselves. The summary is right-aligned to the
+  // block edge instead of sharing their columns: forcing "4 drafts" into
+  // the bill-number column padded every row out and left a gully down the
+  // middle of the list.
+  const bills = alignedBlock(billRows);
+  const width = Math.max(
+    bills.width,
+    ...summaryRows.map((r) => `${r.left}  ${r.amount}${r.right ? `  ${r.right}` : ""}`.length),
+  );
+  const summaryLines = summaryRows.map((r) => {
+    const tail = r.right ? `  ${r.right}` : "";
+    const pad = Math.max(1, width - r.left.length - r.amount.length - tail.length);
+    return `${r.left}${" ".repeat(pad)}${r.amount}${tail}`;
+  });
+
+  const heading = range
+    ? `${titleCase(customer.name).toUpperCase()}\n${range.label}`
+    : titleCase(customer.name).toUpperCase();
+
+  const block = [
+    heading,
+    "",
+    ...bills.lines,
+    "\u2500".repeat(Math.min(width, 34)),
+    ...summaryLines.map((l) => l.trimEnd()),
+  ].join("\n");
+
+  const more = history.allBills.length > history.bills.length;
 
   return {
     text:
-      [...head, ...lines].join("\n") +
-      (more ? `\n\nShowing the last ${history.bills.length}.` : "") +
-      `\n\nOpen one with "show #${history.bills[0]!.bill_no}".`,
+      `<pre>${escapeHtml(block)}</pre>` +
+      (more ? `\nShowing the latest ${history.bills.length} of ${history.allBills.length}.` : ""),
+    parseMode: "HTML" as const,
     // The most recent few, tappable — scrolling a chat to find a number and
     // then typing it back is work the buttons can do.
     actions: [
@@ -995,7 +1102,7 @@ async function handleOrder(
     const nudge = stored.session.customer_ref
       ? ""
       : "\n\nWho is this for? Say: this is Ravi";
-    return { text: `${renderStoredBill(stored)}${nudge}`, actions: billActions(stored) };
+    return billReply(stored, nudge.trim().length > 0 ? nudge.trim() : undefined);
   } catch (err) {
     // An ambiguous name is a question with a known set of answers. Offer
     // them, and remember the message so the answer can re-run it — being
@@ -1082,7 +1189,7 @@ async function handleAddItem(businessId: string, args: string): Promise<Reply> {
     productId,
     priceSource,
   });
-  return { text: `Added ${name} × ${quantity}.\n\n${renderStoredBill(updated)}`, actions: billActions(updated) };
+  return billReply(updated, `Added ${name} × ${quantity}.`);
 }
 
 async function handleRemoveItem(businessId: string, args: string): Promise<Reply> {
@@ -1095,13 +1202,13 @@ async function handleRemoveItem(businessId: string, args: string): Promise<Reply
   const updated = await removeItemFromBill(draft.session.id, name);
   if (!updated) return { text: `"${name}" isn't on this bill.` };
   if (updated.items.length === 0) return { text: "That was the last item — the bill is now empty." };
-  return { text: `Removed ${name}.\n\n${renderStoredBill(updated)}`, actions: billActions(updated) };
+  return billReply(updated, `Removed ${name}.`);
 }
 
 async function handleShowBill(businessId: string): Promise<Reply> {
   const draft = await getCurrentDraft(businessId);
   if (!draft) return { text: "No open bill. Send me an order and I'll make one." };
-  return { text: renderStoredBill(draft), actions: billActions(draft) };
+  return billReply(draft);
 }
 
 // Resolves which bill the seller means: the one they numbered ("#1042"),
@@ -1166,7 +1273,7 @@ async function handleSetCustomer(
 
   const who = titleCase(updated.session.customer_ref ?? customer);
   return {
-    text: `Bill #${updated.session.bill_no} is ${who}'s.\n\n${renderStoredBill(updated)}`,
+    ...billReply(updated, `Bill #${updated.session.bill_no} is ${who}'s.`),
     actions: billActions(updated),
   };
 }
@@ -1192,14 +1299,19 @@ async function handleConfirm(
     ...bill,
     session: { ...bill.session, status: "finalized" as const },
   };
+  // The confirmation note sits AFTER the bill here, so it is appended
+  // outside the monospace block rather than folded into it.
+  const reply = billReply(confirmed);
   return {
+    ...reply,
     text:
-      `${renderStoredBill(confirmed)}\n\n` +
-      `Confirmed. Today: ${sales.count} bill(s), ${formatRupees(sales.total)}` +
-      (sales.openCount > 0
-        ? `\n${sales.openCount} still unconfirmed \u2014 say "open bills".`
-        : ""),
-    actions: billActions(confirmed),
+      `${reply.text}\n` +
+      escapeHtml(
+        `Confirmed. Today: ${sales.count} bill(s), ${formatRupees(sales.total)}` +
+          (sales.openCount > 0
+            ? `\n${sales.openCount} still unconfirmed — say "open bills".`
+            : ""),
+      ),
   };
 }
 
@@ -1230,7 +1342,7 @@ async function handlePayment(
       : `Recorded ${formatRupees(Number(updated.session.amount_paid))} against #${updated.session.bill_no}. ` +
         `${formatRupees(Number(updated.session.total) - Number(updated.session.amount_paid))} still due.`;
 
-  return { text: `${note}\n\n${renderStoredBill(updated)}`, actions: billActions(updated) };
+  return billReply(updated, note);
 }
 
 async function handleDone(businessId: string): Promise<Reply> {
@@ -1332,7 +1444,7 @@ async function handleCorrection(businessId: string, text: string): Promise<Reply
 
     const updated = await setItemQuantity(draft.session.id, onBill.id, quantity);
     return {
-      text: `Updated ${titleCase(onBill.name_snapshot)} to \u00d7 ${quantity}.\n\n${renderStoredBill(updated)}`,
+      ...billReply(updated, `Updated ${titleCase(onBill.name_snapshot)} to × ${quantity}.`),
       actions: billActions(updated),
     };
   }
@@ -1581,7 +1693,7 @@ async function runIntent(
               : noBillFor(intent.customer, "No open bill. Send me an order and I'll make one."),
           };
         }
-        return { text: renderStoredBill(bill), actions: billActions(bill) };
+        return billReply(bill);
       }
       case "confirm":
         return await handleConfirm(businessId, intent.billNo, intent.customer);
@@ -1741,7 +1853,7 @@ export async function handleAction(incoming: IncomingMessage, action: string): P
     try {
       const bill = await getBillByNo(businessId, Number(openNo));
       if (!bill) return { text: `I don't have a bill #${openNo}.` };
-      return { text: renderStoredBill(bill), actions: billActions(bill) };
+      return billReply(bill);
     } catch (err) {
       return { text: `Something went wrong: ${(err as Error).message}` };
     }
