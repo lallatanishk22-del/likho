@@ -127,11 +127,12 @@ export function parseDateRange(
   }
   if (
     /\b(this|last|past|is|pichle)\s+(week|hafte|hafta)\b/.test(lower) ||
+    /\bweekly\b/.test(lower) ||
     /\blast\s+7\s+days\b/.test(lower)
   ) {
     return { label: "Last 7 days", from: addDays(todayStart, -6, tz), to: addDays(todayStart, 1, tz) };
   }
-  if (/\b(this|is)\s+(month|mahine|mahina)\b/.test(lower)) {
+  if (/\b(this|is)\s+(month|mahine|mahina)\b/.test(lower) || /\bmonthly\b/.test(lower)) {
     const parts = new Intl.DateTimeFormat("en-CA", {
       timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit",
     }).format(now).split("-");

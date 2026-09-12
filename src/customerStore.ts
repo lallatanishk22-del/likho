@@ -220,6 +220,9 @@ export interface CustomerBillRow {
 
 export interface CustomerHistory {
   customer: CustomerRow;
+  // Every bill in the period, uncapped. The chat list is trimmed for
+  // readability; a statement must show all of them.
+  allBills: CustomerBillRow[];
   // Set when the seller asked about a period ("yesterday's bill of
   // tanishk"). Figures below then describe THAT window, not all time.
   periodLabel?: string | null;
@@ -279,6 +282,7 @@ export async function loadCustomerHistory(
   return {
     customer,
     periodLabel: range?.label ?? null,
+    allBills: inRange,
     bills: windowed.slice(0, limit),
     billCount: confirmed.length,
     lifetimeTotal: Math.round(lifetimeTotal * 100) / 100,

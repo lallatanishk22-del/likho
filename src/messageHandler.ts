@@ -39,10 +39,11 @@ import {
 } from "./onboarding.js";
 import {
   CustomerAmbiguousError, findCustomer, findCustomerInMessage,
-  loadCustomerHistory, listOutstanding,
+  loadCustomerHistory, listOutstanding, listCustomers,
 } from "./customerStore.js";
-import { toBillData } from "./billRender.js";
+import { toBillData, toStatementData } from "./billRender.js";
 import { renderBill } from "./templates/index.js";
+import { renderStatement } from "./templates/statement.js";
 import { htmlToPdf, PdfUnavailableError } from "./billPdf.js";
 import { TEMPLATE_IDS, TEMPLATE_LABELS, asTemplateId } from "./billData.js";
 import { renderPreviews, previewData } from "./billPreviews.js";
@@ -653,6 +654,31 @@ async function handleOnboarding(
     }
 
     case "prices": {
+      // GUARD 1 — AN ORDER IS NOT A PRICE LIST.
+      //
+      // Without this, "ria bhanushali 2 paneer 1 chai" was SAVED AS A
+      // PRODUCT called "ria bhanushali" at Rs 2. A real order silently
+      // became a price, the bill never existed, and every later bill
+      // number shifted. The kind step already had this guard; the prices
+      // step did not.
+      if (looksLikeAnOrder(text)) {
+        const catalog = await loadCatalog(businessId);
+        if (catalog.products.length > 0) {
+          await setOnboardingStep(businessId, "done");
+          return await handleOrder(businessId, text, sourceMessageId, incoming.onSlowWork);
+        }
+      }
+
+      // GUARD 2 — NEITHER IS ANY OTHER INSTRUCTION.
+      //
+      // "shop upi shree@okaxis" was saved as a product named
+      // "shop upi shree@okaxis". Setup asks a question; it does not get to
+      // reinterpret everything the seller says while it waits.
+      const otherIntent = classifyIntent(text).name;
+      if (otherIntent !== "order" && otherIntent !== "greeting") {
+        return await runIntent(businessId, incoming, text, sourceMessageId);
+      }
+
       // "/add paneer 220" is the right answer, typed with a command the
       // seller may have seen in /help. Strip it rather than reject it.
       const args = text.replace(/^\/add\s*/i, "").trim();
@@ -796,10 +822,13 @@ async function handleCustomerHistory(
       `\n\nOpen one with "show #${history.bills[0]!.bill_no}".`,
     // The most recent few, tappable — scrolling a chat to find a number and
     // then typing it back is work the buttons can do.
-    actions: history.bills.slice(0, 4).map((b) => ({
-      label: `#${b.bill_no} · ${formatRupees(Number(b.total))}`,
-      action: `open:${b.bill_no}`,
-    })),
+    actions: [
+      ...history.bills.slice(0, 3).map((b) => ({
+        label: `#${b.bill_no} · ${formatRupees(Number(b.total))}`,
+        action: `open:${b.bill_no}`,
+      })),
+      { label: "📄 Statement PDF", action: `stmt:${customer.id}` },
+    ],
   };
 }
 
@@ -818,6 +847,94 @@ async function handleOutstanding(businessId: string): Promise<Reply> {
       lines.join("\n") +
       (owing.length > 15 ? `\n\nShowing the top 15.` : ""),
   };
+}
+
+// Does this message name something the seller actually sells? Used to tell
+// an unfinished order ("ravi paneer" — worth asking the quantity) from a
+// message that was never an order at all ("dude bill of ria whole time").
+async function mentionsKnownProduct(businessId: string, text: string): Promise<boolean> {
+  const catalog = await loadCatalog(businessId);
+  if (catalog.products.length === 0) return false;
+  const index = buildCatalogIndex(catalog);
+
+  const words = text.toLowerCase().replace(/[^\p{L}\s]/gu, " ").split(/\s+/).filter(Boolean);
+  for (const size of [3, 2, 1]) {
+    for (let i = 0; i + size <= words.length; i++) {
+      const found = findProduct(words.slice(i, i + size).join(" "), index);
+      if (found && found !== "ambiguous") return true;
+    }
+  }
+  return false;
+}
+
+// The honest reply when a message is not an order and names nobody known.
+async function notAnOrderReply(businessId: string, text: string): Promise<Reply> {
+  const customers = await listCustomers(businessId);
+  const looksLikeAName = /^[\p{L}\s'’.]+$/u.test(text.trim()) && text.trim().split(/\s+/).length <= 4;
+
+  if (looksLikeAName && customers.length > 0) {
+    return {
+      text:
+        `I don't have that customer yet.\n\n` +
+        `They'll appear here after their first bill \u2014 send one like:\n` +
+        `  Pooja 2 chai\n\n` +
+        `Customers I do have:\n${customers.slice(0, 10).map((c) => `  ${titleCase(c.name)}`).join("\n")}`,
+    };
+  }
+
+  return {
+    text:
+      "I couldn't find an order in that — a bill needs quantities.\n\n" +
+      "Send it like:\n  Ravi 2 paneer 1 chai\n\n" +
+      "Or ask me about someone:\n  ravi\n  who hasn't paid\n  sales",
+  };
+}
+
+// A customer's whole account as one PDF. Asked for as "lifetime bill of
+// ria", "tanishk monthly", "ravi weekly statement".
+//
+// Every figure comes from stored bills — the same numbers the chat shows,
+// because both read the same rows. A statement that disagreed with the
+// bills it lists would be worse than no statement.
+async function handleStatement(
+  businessId: string,
+  name: string,
+  range: { label: string; from: Date; to: Date } | null,
+  onSlowWork?: () => Promise<void>,
+): Promise<Reply> {
+  await onSlowWork?.();
+
+  const customer = await findCustomer(businessId, name);
+  if (!customer) return { text: `I don't have anyone called "${name}" yet.` };
+
+  const history = await loadCustomerHistory(businessId, customer, range, 1000);
+  if (history.allBills.length === 0) {
+    return {
+      text: `${titleCase(customer.name)} has no bills${range ? ` in ${range.label.toLowerCase()}` : ""}.`,
+    };
+  }
+
+  const business = await loadBusinessProfile(businessId);
+  const data = await toStatementData(history, business, history.allBills);
+
+  try {
+    const path = await htmlToPdf(renderStatement(data), `statement-${customer.name}`);
+    return {
+      text: "",
+      document: {
+        path,
+        caption:
+          `${titleCase(customer.name)} · ${data.periodLabel}\n` +
+          `${data.billCount} bill(s) · ${formatRupees(data.grandTotal)} billed · ` +
+          `${formatRupees(data.outstanding)} outstanding`,
+      },
+    };
+  } catch (err) {
+    if (err instanceof PdfUnavailableError) {
+      return { text: "I can't make PDFs on this machine — no Chrome found." };
+    }
+    throw err;
+  }
 }
 
 async function handlePrices(businessId: string): Promise<string> {
@@ -1472,6 +1589,14 @@ async function runIntent(
         return await handlePayment(businessId, intent.billNo, intent.amount, intent.customer);
       case "pdf":
         return { text: "PDF export isn't ready yet — the bill above is the record for now." };
+      case "customer_statement": {
+        const named = await findCustomerInMessage(businessId, stripDateExpressions(text));
+        if (named === "ambiguous") {
+          return { text: "That names more than one customer. Which one did you mean?" };
+        }
+        if (!named) return await notAnOrderReply(businessId, stripDateExpressions(text));
+        return await handleStatement(businessId, named.name, parseDateRange(text), incoming.onSlowWork);
+      }
       case "customer_history":
         return await handleCustomerHistory(businessId, intent.text);
       case "outstanding":
@@ -1532,6 +1657,23 @@ async function runIntent(
             return { text: "That names more than one customer. Which one did you mean?" };
           }
           if (named) return await handleCustomerHistory(businessId, named.name, range);
+
+          // NOBODY MATCHED, AND THERE IS NO QUANTITY HERE.
+          //
+          // A bill needs a quantity. Without one there is nothing to
+          // charge for, so handing this to the order parser can only
+          // produce a question with no answer — which is exactly what
+          // happened: "what about ria" came back "What items did Ria
+          // order?", then "Couldn't find any items in this order."
+          //
+          // The catalog decides whether it is worth asking: a message that
+          // names a real product but no quantity IS an unfinished order and
+          // deserves the question. One naming neither is not an order at
+          // all and gets a straight answer instead of an interrogation.
+          const unfinished = await mentionsKnownProduct(businessId, withoutDate);
+          if (!unfinished) {
+            return notAnOrderReply(businessId, withoutDate);
+          }
         }
         return await handleOrder(businessId, text, sourceMessageId, incoming.onSlowWork);
       }
@@ -1577,6 +1719,18 @@ export async function handleAction(incoming: IncomingMessage, action: string): P
       if (action === SKIP_ACTION) return await handleSkipSetup(businessId);
       if (action === FORMAT_ACTION) return await handleBillFormat(businessId, incoming.onSlowWork);
       return await handleBusinessInfo(businessId, "");
+    } catch (err) {
+      return { text: `Something went wrong: ${(err as Error).message}` };
+    }
+  }
+
+  if (action.startsWith("stmt:")) {
+    try {
+      const customerId = action.slice(5);
+      const customers = await listCustomers(businessId);
+      const customer = customers.find((c) => c.id === customerId);
+      if (!customer) return { text: "That customer isn't in your list any more." };
+      return await handleStatement(businessId, customer.name, null, incoming.onSlowWork);
     } catch (err) {
       return { text: `Something went wrong: ${(err as Error).message}` };
     }

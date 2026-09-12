@@ -67,3 +67,78 @@ export function toBillData(stored: StoredBill, business: BusinessProfile): BillD
     notes: null,
   };
 }
+
+// --- Statement ------------------------------------------------------------
+
+import type { StatementData, StatementLine } from "./statementData.js";
+import type { CustomerHistory } from "./customerStore.js";
+import { rest } from "./catalogStore.js";
+
+// Builds a statement from bills that are ALREADY STORED. Every figure is
+// copied; the totals are sums of stored bill totals, never a recalculation
+// from line items. A statement is what gets shown when there is a
+// disagreement about money, so it must agree with the bills exactly.
+export async function toStatementData(
+  history: CustomerHistory,
+  business: BusinessProfile,
+  allBills: {
+    id: string; bill_no: number; total: string | number; amount_paid: string | number;
+    payment_status: "pending" | "partial" | "paid"; status: string;
+    created_at: string; finalized_at: string | null;
+  }[],
+): Promise<StatementData> {
+  // One query for every line on the statement, rather than one per bill.
+  const ids = allBills.map((b) => b.id);
+  const items = ids.length
+    ? ((await rest(
+        `bill_items?bill_session_id=in.(${ids.join(",")})&order=position.asc&select=bill_session_id,name_snapshot,quantity`,
+      )) as { bill_session_id: string; name_snapshot: string; quantity: number }[])
+    : [];
+
+  const byBill = new Map<string, string[]>();
+  for (const item of items) {
+    const list = byBill.get(item.bill_session_id) ?? [];
+    list.push(`${item.name_snapshot} × ${item.quantity}`);
+    byBill.set(item.bill_session_id, list);
+  }
+
+  const lines: StatementLine[] = allBills.map((bill) => {
+    const stamp = bill.finalized_at ?? bill.created_at;
+    const summary = byBill.get(bill.id) ?? [];
+    return {
+      billNo: bill.bill_no,
+      dateLabel: formatBusinessDate(new Date(stamp)),
+      timeLabel: timeOnly(stamp),
+      total: Number(bill.total),
+      amountPaid: Number(bill.amount_paid),
+      paymentStatus: bill.payment_status,
+      confirmed: bill.status === "finalized",
+      // Long orders are truncated so a row cannot push the money column off
+      // the page; the full bill is always available by its number.
+      itemSummary:
+        summary.length <= 3
+          ? summary.join(", ")
+          : `${summary.slice(0, 3).join(", ")} +${summary.length - 3} more`,
+    };
+  });
+
+  return {
+    business: {
+      name: business.name,
+      phone: business.phone ?? null,
+      address: business.address ?? null,
+      gstin: business.gstin ?? null,
+      upiId: business.upiId ?? null,
+      logoUrl: business.logoUrl ?? null,
+      footerNote: business.footerNote ?? null,
+    },
+    customerName: displayName(history.customer.name),
+    periodLabel: history.periodLabel ?? "All time",
+    generatedLabel: formatBusinessDateTime(new Date()),
+    lines,
+    billCount: history.billCount,
+    grandTotal: history.lifetimeTotal,
+    paidTotal: Math.round((history.lifetimeTotal - history.outstanding) * 100) / 100,
+    outstanding: history.outstanding,
+  };
+}

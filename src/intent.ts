@@ -28,6 +28,7 @@ export type IntentName =
   | "bill_format"
   | "mock"
   | "customer_history"
+  | "customer_statement"
   | "outstanding"
   | "business_info"
   | "learned"
@@ -292,6 +293,17 @@ export function classifyIntent(rawText: string): Intent {
     if (!/\d/.test(lower) || billNo !== null) {
       return { ...base, name: "confirm", customer: extractCustomer(text) };
     }
+  }
+
+  // Asking for the whole account as a document. Checked before plain
+  // history so "lifetime bill of ria" produces a PDF rather than a chat
+  // list — the seller asked for something they can send on.
+  if (
+    /\b(lifetime|life time|statement|ledger|account\s+summary|full\s+(bill|record|history))\b/i.test(lower) ||
+    (/\b(monthly|weekly|yearly)\b/i.test(lower) && /\b(bill|bills|statement|report|summary|total)\b/i.test(lower)) ||
+    (/\b(pdf|print|download)\b/i.test(lower) && /\b(bill|bills|statement|history|account|khata)\b/i.test(lower))
+  ) {
+    return { ...base, name: "customer_statement" };
   }
 
   // --- Customer history --------------------------------------------------

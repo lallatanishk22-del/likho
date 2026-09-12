@@ -1,4 +1,4 @@
-import type { BillData, BillLineView } from "../billData.js";
+import type { BillBusiness, BillData, BillLineView } from "../billData.js";
 
 // Helpers every template shares. Nothing here computes money — money
 // arrives already calculated and these functions only turn it into text.
@@ -90,7 +90,7 @@ export function summaryRows(data: BillData): SummaryRow[] {
 }
 
 // Business identity lines, minus anything not provided.
-export function businessLines(data: BillData): string[] {
+export function businessLines(data: { business: BillBusiness }): string[] {
   const b = data.business;
   return [b.address, b.phone, has(b.gstin) ? `GSTIN: ${b.gstin}` : null]
     .filter(has)
@@ -105,7 +105,7 @@ export function customerLines(data: BillData): string[] {
 
 // Rendered only when a logo URL exists. No placeholder, no empty box — a
 // bill without a logo should look deliberate, not broken.
-export function logoImg(data: BillData, size: number): string {
+export function logoImg(data: { business: BillBusiness }, size: number): string {
   if (!has(data.business.logoUrl)) return "";
   return `<img class="logo" src="${esc(data.business.logoUrl)}" alt="" style="max-height:${size}px;max-width:${size * 3}px" />`;
 }
