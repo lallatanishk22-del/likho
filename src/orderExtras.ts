@@ -1,4 +1,5 @@
-import type { BillCharge } from "./types.js";
+import type { BillCharge, BillNote } from "./types.js";
+import { classifyNote, dedupeNotes } from "./orderNotes.js";
 
 // The parts of an order that are NOT items.
 //
@@ -26,6 +27,10 @@ export interface OrderExtras {
   charges: BillCharge[];
   paymentMethod: string | null;
   customer: string | null;
+  // What the seller said that is not money: "less spicy", "deliver by
+  // 8pm". Captured here rather than sent to the model, which produced no
+  // item for it and silently dropped it. See orderNotes.ts.
+  notes: BillNote[];
   // The message with all of the above removed.
   rest: string;
 }
@@ -79,6 +84,7 @@ export function parseOrderExtras(
   isProduct: (phrase: string) => boolean = () => false,
 ): OrderExtras {
   const charges: BillCharge[] = [];
+  const notes: BillNote[] = [];
   let paymentMethod: string | null = null;
   let customer: string | null = null;
 
@@ -151,8 +157,24 @@ export function parseOrderExtras(
       continue;
     }
 
+    // LAST, so every parser above has had its chance. Whatever is left
+    // that names no product and states no money is an instruction, not an
+    // item — and it must reach the bill rather than the extractor, which
+    // makes no item of it and drops it without a word.
+    const note = classifyNote(line, isProduct);
+    if (note) {
+      notes.push(note);
+      continue;
+    }
+
     kept.push(line);
   }
 
-  return { charges, paymentMethod, customer, rest: kept.join("\n") };
+  return {
+    charges,
+    paymentMethod,
+    customer,
+    notes: dedupeNotes(notes),
+    rest: kept.join("\n"),
+  };
 }

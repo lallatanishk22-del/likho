@@ -34,3 +34,18 @@ export interface Bill {
   chargesTotal: number;
   total: number;
 }
+
+// What the seller said that is not money: "less spicy", "deliver by 8pm",
+// "no onion". A bill is the record of a transaction and these are part of
+// that transaction, so they print on the document rather than being lost
+// between the order message and the kitchen.
+//
+// The category chooses a heading only. Capture is structural (a line that
+// names no product and states no money), so a missed category still shows
+// the text — under "Note" — and nothing is lost.
+export type NoteCategory = "prep" | "timing" | "packing" | "delivery" | "note";
+
+export interface BillNote {
+  category: NoteCategory;
+  text: string;
+}

@@ -1,4 +1,6 @@
 import type { StoredBill } from "./billStore.js";
+import type { BillNote } from "./types.js";
+import { CATEGORY_LABEL } from "./orderNotes.js";
 import type { BillData, BillBusiness } from "./billData.js";
 import { formatBusinessDate, formatBusinessDateTime } from "./businessDay.js";
 
@@ -27,6 +29,19 @@ function timeOnly(iso: string): string {
   const full = formatBusinessDateTime(new Date(iso));
   const parts = full.split(", ");
   return parts.length > 1 ? parts.slice(1).join(", ") : full;
+}
+
+// "Prep: less spicy; no onion · Timing: deliver by 8pm"
+export function renderNotesLine(notes: BillNote[]): string | null {
+  if (notes.length === 0) return null;
+  const byCategory = new Map<string, string[]>();
+  for (const n of notes) {
+    const label = CATEGORY_LABEL[n.category] ?? CATEGORY_LABEL.note;
+    byCategory.set(label, [...(byCategory.get(label) ?? []), n.text]);
+  }
+  return [...byCategory.entries()]
+    .map(([label, texts]) => `${label}: ${texts.join("; ")}`)
+    .join("  \u00b7  ");
 }
 
 export function toBillData(stored: StoredBill, business: BusinessProfile): BillData {
@@ -65,7 +80,11 @@ export function toBillData(stored: StoredBill, business: BusinessProfile): BillD
     amountPaid: Number(session.amount_paid),
     paymentStatus: session.payment_status,
     paymentMethod: session.payment_method ?? null,
-    notes: null,
+    // The seller's instructions, on the document the customer and the
+    // kitchen actually look at. Grouped by heading and joined onto one
+    // line, because all six templates render this as a single string and
+    // none of them preserves newlines.
+    notes: renderNotesLine(Array.isArray(stored.session.notes) ? stored.session.notes : []),
   };
 }
 

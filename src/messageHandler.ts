@@ -896,7 +896,7 @@ async function handleOrder(
     // inferred — the seller said it outright.
     const withCustomer = extras.customer ? { ...parsed, customer: extras.customer } : parsed;
     const stored = await createBillSession(
-      businessId, withCustomer, bill, sourceMessageId, extras.paymentMethod,
+      businessId, withCustomer, bill, sourceMessageId, extras.paymentMethod, extras.notes,
     );
     // An anonymous bill is a hole in the business's memory: it can never
     // be looked up by name, chased for payment, or counted toward what a
@@ -920,6 +920,7 @@ async function handleOrder(
       unitPrices: parsed.items.map((i) => i.unitPrice),
       chargeAmounts: extras.charges.map((c) => c.amount),
       discountPercent: statedDiscount ?? parsed.discountPercent ?? null,
+      noteTexts: extras.notes.map((n) => n.text),
     });
     const leftOverNote =
       leftOver.length > 0

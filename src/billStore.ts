@@ -1,4 +1,4 @@
-import type { Bill } from "./types.js";
+import type { Bill, BillNote } from "./types.js";
 import type { ParsedOrder } from "./structuredOrder.js";
 import { rest } from "./catalogStore.js";
 import { startOfBusinessDay, type DateRange } from "./businessDay.js";
@@ -41,6 +41,10 @@ export interface BillSessionRow {
   charges: { label: string; amount: number }[];
   charges_total: string | number;
   payment_method: string | null;
+  // Instructions that are not money: "less spicy", "deliver by 8pm".
+  // Stored with the bill because they are part of the transaction the
+  // bill records — see orderNotes.ts.
+  notes: BillNote[];
   updated_at: string;
 }
 
@@ -98,6 +102,7 @@ export async function createBillSession(
   bill: Bill,
   sourceMessageId: string | null,
   paymentMethod: string | null = null,
+  notes: BillNote[] = [],
 ): Promise<StoredBill> {
   const billNo = await allocateBillNo(businessId);
 
@@ -125,6 +130,7 @@ export async function createBillSession(
       charges: bill.charges,
       charges_total: bill.chargesTotal,
       payment_method: paymentMethod,
+      notes,
       total: bill.total,
     }),
   })) as BillSessionRow[];

@@ -2,6 +2,7 @@ import type { StoredBill } from "./billStore.js";
 import type { Reply, ReplyAction } from "./reply.js";
 import { formatBusinessDateTime } from "./businessDay.js";
 import { escapeHtml } from "./billText.js";
+import { CATEGORY_LABEL } from "./orderNotes.js";
 
 // How a bill and a history list LOOK in the chat.
 //
@@ -75,6 +76,26 @@ export function renderStoredBill(stored: StoredBill): string {
   // in a chat, "which day was this?" has no answer without it.
   const stamp = formatBusinessDateTime(new Date(session.finalized_at ?? session.created_at));
 
+  // INSTRUCTIONS GET THEIR OWN SPACE ON THE DOCUMENT.
+  //
+  // "less spicy" used to be thrown away between the order message and the
+  // kitchen, leaving the seller to remember it themselves — which is the
+  // exact work Likho exists to remove. Grouped by heading, below the
+  // total, so the money table above is never disturbed by prose.
+  const notes = Array.isArray(session.notes) ? session.notes : [];
+  const noteBlock: string[] = [];
+  if (notes.length > 0) {
+    const byCategory = new Map<string, string[]>();
+    for (const n of notes) {
+      const label = CATEGORY_LABEL[n.category] ?? CATEGORY_LABEL.note;
+      byCategory.set(label, [...(byCategory.get(label) ?? []), n.text]);
+    }
+    noteBlock.push("", "\u2500".repeat(width), "NOTES");
+    for (const [label, texts] of byCategory) {
+      noteBlock.push(`${label}: ${texts.join("; ")}`);
+    }
+  }
+
   return [
     `\u{1f9fe} ${who}Bill #${session.bill_no}`,
     stamp,
@@ -84,6 +105,7 @@ export function renderStoredBill(stored: StoredBill): string {
     ...summary.map(line),
     "",
     `Payment: ${paid}${method}`,
+    ...noteBlock,
   ].join("\n");
 }
 
