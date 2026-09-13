@@ -13,8 +13,12 @@ import { applyCatalog } from "./catalog.js";
 // "safe to bill" never changes based on which model answered.
 const FIREWORKS_URL =
   process.env["FIREWORKS_URL"] ?? "https://api.fireworks.ai/inference/v1/chat/completions";
+// llama-v3p1-70b-instruct was the default here for months and had been
+// RETIRED by Fireworks the whole time — every escalation 404'd. Pin a
+// model that is actually reachable, and keep the override so a dead
+// default is a one-line env change rather than a deploy.
 const FIREWORKS_MODEL =
-  process.env["FIREWORKS_MODEL"] ?? "accounts/fireworks/models/llama-v3p1-70b-instruct";
+  process.env["FIREWORKS_MODEL"] ?? "accounts/fireworks/models/gpt-oss-120b";
 
 interface FireworksChatResponse {
   choices: { message: { content: string } }[];
@@ -45,7 +49,21 @@ export async function parseOrderWithCloudAI(text: string, options?: ParseOptions
     }),
   });
 
+  // A DEAD MODEL AND A BAD KEY MUST NOT LOOK THE SAME.
+  //
+  // Both used to read "Cloud model unavailable (404)". They are opposite
+  // problems — one is a config line, the other is an account — and hours
+  // went into telling them apart from a log that refused to say which.
   if (!response.ok) {
+    if (response.status === 401) {
+      throw new Error("Cloud model unavailable — FIREWORKS_API_KEY was rejected.");
+    }
+    if (response.status === 404) {
+      throw new Error(`Cloud model unavailable — no such model "${FIREWORKS_MODEL}" on this account.`);
+    }
+    if (response.status === 429) {
+      throw new Error("Cloud model unavailable — rate limited.");
+    }
     throw new Error(`Cloud model unavailable (${response.status}).`);
   }
 
