@@ -145,6 +145,66 @@ export function findCandidates(name: string, index: CatalogIndex): CatalogProduc
     .map((x) => x.product);
 }
 
+// THE SELLER'S OWN LIST DECIDES WHAT IS A PRODUCT.
+//
+// A model handed "2 plate paneer tikka" reports the item as "plate paneer
+// tikka", and the whole order dies on "I don't have a price for that".
+// The same happens for every container word ("plate", "glass", "dabba",
+// "packet"), every adjective ("garam", "thanda", "extra spicy") and every
+// language they might be typed in.
+//
+// There is no list of words that fixes this — that is the trap. "garam"
+// is Hindi, "sada" is Marathi, "sukha" is Gujarati, and tomorrow someone
+// types "2 large paneer tikka". The seller's price list, though, is
+// GROUND TRUTH: it is the complete set of things they actually sell.
+//
+// So: look for a catalog product INSIDE the reported name.
+//
+//   "plate paneer tikka"  contains  "paneer tikka"   -> Paneer Tikka
+//   "thanda coke"         contains  "coke"           -> Coke
+//
+// Discipline, identical to the near-matching rules next door:
+//   - LONGEST window wins, so "paneer roll" always beats "paneer".
+//   - Two DIFFERENT products at the same length is a refusal, not a
+//     coin toss.
+//   - The window is matched with the full tiered lookup, so a misspelling
+//     inside a wrapped phrase ("1 plate panner tikka") still resolves.
+//   - A window that is only digits is never a product.
+//
+// The canonical name is what prints on the bill, so the seller sees
+// "Paneer Tikka × 2" in the preview and can catch a wrong match before
+// confirming. That is the same safety that makes near-matching acceptable.
+export function findProductByContainment(
+  name: string,
+  index: CatalogIndex,
+): CatalogMatch | "ambiguous" | null {
+  const tokens = name.toLowerCase().split(/\s+/).filter((t) => t.length > 0);
+  // A single token cannot CONTAIN anything — findProduct already judged it.
+  if (tokens.length < 2) return null;
+
+  for (let size = tokens.length - 1; size >= 1; size--) {
+    const hits: CatalogProduct[] = [];
+    let sawAmbiguous = false;
+
+    for (let start = 0; start + size <= tokens.length; start++) {
+      const window = tokens.slice(start, start + size);
+      if (window.every((t) => /^\d+$/.test(t))) continue;
+
+      const found = findProduct(window.join(" "), index);
+      if (found === "ambiguous") { sawAmbiguous = true; continue; }
+      if (found === null) continue;
+      if (!hits.some((p) => p.id === found.product.id)) hits.push(found.product);
+    }
+
+    if (hits.length === 1) return { product: hits[0]!, kind: "near" };
+    // Two different products of equal length inside one name is a genuine
+    // ambiguity ("paneer tikka roll" when both exist) — ask, never guess.
+    if (hits.length > 1 || sawAmbiguous) return "ambiguous";
+  }
+
+  return null;
+}
+
 export function findProduct(
   name: string,
   index: CatalogIndex,
@@ -298,6 +358,31 @@ export function resolvePrices(
       continue;
     }
     if (found === null) {
+      // Before giving up: is a product the seller DOES sell sitting inside
+      // the name the model reported? "plate paneer tikka" is Paneer Tikka
+      // wrapped in a container word.
+      const inside = findProductByContainment(item.name, index);
+      if (inside !== null && inside !== "ambiguous") {
+        resolved.push({
+          name: inside.product.name,
+          quantity: item.quantity,
+          unitPrice: inside.product.price,
+          priceSource: "catalog",
+          productId: inside.product.id,
+          evidence: item.evidence,
+        });
+        continue;
+      }
+      if (inside === "ambiguous") {
+        unresolved.push({
+          name: item.name,
+          reason: "ambiguous_in_catalog",
+          candidates: findCandidates(item.name, index).map((p) => ({
+            id: p.id, name: p.name, price: p.price,
+          })),
+        });
+        continue;
+      }
       unresolved.push({ name: item.name, reason: "not_in_catalog" });
       continue;
     }

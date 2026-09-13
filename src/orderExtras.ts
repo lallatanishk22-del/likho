@@ -78,7 +78,21 @@ export function parseOrderExtras(text: string): OrderExtras {
   const kept: string[] = [];
 
   for (const rawLine of text.split(/\r?\n/)) {
-    const line = rawLine.trim();
+    // A TABLE NUMBER IS NOT A QUANTITY.
+    //
+    // "room 12 me 3 chai bhejna" was refused: "the message appears to
+    // mention 1 more item(s) (quantities: 12)". The trust layer was right
+    // — 12 was unexplained — but it is a room, not an order of twelve.
+    //
+    // A closed list, for the same reason as CHARGE_WORDS above: these are
+    // the words an Indian restaurant actually numbers, and an unknown word
+    // before a number is far more likely to be a product. The number must
+    // FOLLOW the word; "2 table" is left alone, since a quantity precedes
+    // what it counts.
+    const line = rawLine
+      .replace(/\b(table|room|seat|counter|cabin|cabin no|kitchen|floor)\s*(?:no\.?|number|#)?\s*\d{1,3}\b/gi, " ")
+      .replace(/\s{2,}/g, " ")
+      .trim();
     if (line.length === 0) continue;
 
     // "customer Rahul" / "cust: Rahul" / "name Rahul"

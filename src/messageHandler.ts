@@ -24,10 +24,11 @@ import {
   setBillDiscount,
   type StoredBill,
 } from "./billStore.js";
-import { buildCatalogIndex, findProduct, CatalogResolutionError } from "./catalog.js";
+import { buildCatalogIndex, findProduct, findProductByContainment, CatalogResolutionError } from "./catalog.js";
 import { classifyIntent } from "./intent.js";
 import { parseDiscount } from "./discount.js";
 import { parseOrderExtras } from "./orderExtras.js";
+import { expandHindiNumerals, hasNumeralWord } from "./hindiNumerals.js";
 import { auditPriceList } from "./priceListAudit.js";
 import {
   handleCustomerHistory, handleOutstanding, handleStatement, handleSettle,
@@ -859,7 +860,24 @@ async function handleOrder(
   // refused because "30" (delivery) belonged to nothing the trust layer
   // knew about. See orderExtras.ts.
   const extras = parseOrderExtras(text);
-  const { percent: statedDiscount, rest: orderText } = parseDiscount(extras.rest);
+  const { percent: statedDiscount, rest: withoutDiscount } = parseDiscount(extras.rest);
+
+  // A quantity written as a word ("do chai") is still a quantity. Rewritten
+  // to a digit here, deterministically, BEFORE the model — the same move as
+  // dates, discounts and charges: strip what code can read exactly, and let
+  // the model classify only what is left.
+  //
+  // The catalog is the guard. "do" is also an ordinary English verb, so the
+  // numeral only counts when the words after it name something the seller
+  // actually sells — including when they are wrapped ("do plate paneer
+  // tikka"), which is why containment is used here too.
+  const catalogIndex = buildCatalogIndex(catalog);
+  const orderText = expandHindiNumerals(withoutDiscount, (phrase) => {
+    const direct = findProduct(phrase, catalogIndex);
+    if (direct !== null && direct !== "ambiguous") return true;
+    const inside = findProductByContainment(phrase, catalogIndex);
+    return inside !== null && inside !== "ambiguous";
+  });
 
   try {
     const { parsed } = await routeParseOrder(orderText, { catalog });
@@ -1343,9 +1361,36 @@ async function remember(businessId: string, reply: Reply): Promise<Reply> {
 async function runIntent(
   businessId: string,
   incoming: IncomingMessage,
-  text: string,
+  rawText: string,
   sourceMessageId: string | null,
 ): Promise<Reply> {
+  // A QUANTITY WRITTEN AS A WORD MUST BE A DIGIT BEFORE ANYTHING CLASSIFIES.
+  //
+  // "Suresh bhaiya ko do plate paneer tikka bhej do" was CONFIRMING the
+  // previous bill. "bhej" is a confirm word ("send it"), and the guard that
+  // stops it — "not if the message states a quantity" — could not see that
+  // "do" IS the quantity. Rule 0 could not see it either, so an order
+  // became a confirmation of someone else's bill.
+  //
+  // Expanding here rather than inside the order handler means every rule
+  // downstream sees the same digits a seller who typed "2" would have got.
+  // The catalog is only loaded when a numeral word is actually present, so
+  // an English message costs one regex.
+  let text = rawText;
+  if (hasNumeralWord(rawText)) {
+    try {
+      const index = buildCatalogIndex(await loadCatalog(businessId));
+      text = expandHindiNumerals(rawText, (phrase) => {
+        const direct = findProduct(phrase, index);
+        if (direct !== null && direct !== "ambiguous") return true;
+        const inside = findProductByContainment(phrase, index);
+        return inside !== null && inside !== "ambiguous";
+      });
+    } catch {
+      // A price-store hiccup must never stop a message being handled.
+    }
+  }
+
   const intent = classifyIntent(text);
 
   try {
