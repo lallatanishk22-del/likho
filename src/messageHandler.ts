@@ -29,6 +29,7 @@ import { classifyIntent } from "./intent.js";
 import { parseDiscount } from "./discount.js";
 import { parseOrderExtras } from "./orderExtras.js";
 import { expandHindiNumerals, hasNumeralWord } from "./hindiNumerals.js";
+import { unusedNumbers } from "./unusedNumbers.js";
 import { auditPriceList } from "./priceListAudit.js";
 import {
   handleCustomerHistory, handleOutstanding, handleStatement, handleSettle,
@@ -859,7 +860,15 @@ async function handleOrder(
   // payment mode, an explicit customer line. Sent whole, a real order was
   // refused because "30" (delivery) belonged to nothing the trust layer
   // knew about. See orderExtras.ts.
-  const extras = parseOrderExtras(text);
+  const catalogIndex = buildCatalogIndex(catalog);
+  const namesAProduct = (phrase: string): boolean => {
+    const direct = findProduct(phrase, catalogIndex);
+    if (direct !== null && direct !== "ambiguous") return true;
+    const inside = findProductByContainment(phrase, catalogIndex);
+    return inside !== null && inside !== "ambiguous";
+  };
+
+  const extras = parseOrderExtras(text, namesAProduct);
   const { percent: statedDiscount, rest: withoutDiscount } = parseDiscount(extras.rest);
 
   // A quantity written as a word ("do chai") is still a quantity. Rewritten
@@ -871,13 +880,7 @@ async function handleOrder(
   // numeral only counts when the words after it name something the seller
   // actually sells — including when they are wrapped ("do plate paneer
   // tikka"), which is why containment is used here too.
-  const catalogIndex = buildCatalogIndex(catalog);
-  const orderText = expandHindiNumerals(withoutDiscount, (phrase) => {
-    const direct = findProduct(phrase, catalogIndex);
-    if (direct !== null && direct !== "ambiguous") return true;
-    const inside = findProductByContainment(phrase, catalogIndex);
-    return inside !== null && inside !== "ambiguous";
-  });
+  const orderText = expandHindiNumerals(withoutDiscount, namesAProduct);
 
   try {
     const { parsed } = await routeParseOrder(orderText, { catalog });
@@ -902,7 +905,29 @@ async function handleOrder(
     const nudge = stored.session.customer_ref
       ? ""
       : "\n\nWho is this for? Say: this is Ravi";
-    return billReply(stored, nudge.trim().length > 0 ? nudge.trim() : undefined);
+
+    // NOTHING THE SELLER TYPED DISAPPEARS WITHOUT A WORD.
+    //
+    // "home delivery 50" was dropped silently: the charge parser did not
+    // recognise it, the model made no item of it, and a complete-looking
+    // bill came back Rs 50 short. A wrong bill gets argued about and
+    // corrected; a quiet one gets sent to the customer.
+    //
+    // This never refuses and never changes a total — the parsers already
+    // decided. It only says what they did not use.
+    const leftOver = unusedNumbers(text, {
+      quantities: parsed.items.map((i) => i.quantity),
+      unitPrices: parsed.items.map((i) => i.unitPrice),
+      chargeAmounts: extras.charges.map((c) => c.amount),
+      discountPercent: statedDiscount ?? parsed.discountPercent ?? null,
+    });
+    const leftOverNote =
+      leftOver.length > 0
+        ? `\n\nI didn't use: ${leftOver.join(", ")}. If that's a charge, send:  delivery ${leftOver[0]}`
+        : "";
+
+    const note = `${nudge}${leftOverNote}`.trim();
+    return billReply(stored, note.length > 0 ? note : undefined);
   } catch (err) {
     // An ambiguous name is a question with a known set of answers. Offer
     // them, and remember the message so the answer can re-run it — being

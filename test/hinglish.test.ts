@@ -169,3 +169,41 @@ test("an ordinary order keeps every one of its numbers", () => {
     assert.equal(parseOrderExtras(t).rest, t, t);
   }
 });
+
+// --- A charge word is rarely alone --------------------------------------
+//
+// Reported: "home delivery 50" was SILENTLY DROPPED. The charge word had
+// to be the whole phrase, so two words matched nothing, the line went to
+// the model as an item, the model made no item of it, and ₹50 left a
+// complete-looking bill. The seller read ₹920 believing it was ₹970.
+
+test("a charge word anywhere in the phrase is enough", () => {
+  for (const [line, label, amount] of [
+    ["home delivery 50", "Delivery", 50],
+    ["delivery charge 50", "Delivery", 50],
+    ["extra packing 20", "Packing", 20],
+    ["packing charges 30", "Packing", 30],
+    ["50 home delivery", "Delivery", 50],
+  ] as [string, string, number][]) {
+    assert.deepEqual(parseOrderExtras(line).charges, [{ label, amount }], line);
+  }
+});
+
+test("the canonical label prints, not the seller's spelling", () => {
+  assert.deepEqual(parseOrderExtras("home delivary 50").charges, [{ label: "Delivery", amount: 50 }]);
+});
+
+test("an ordinary item line is never turned into a charge", () => {
+  for (const line of ["3 thali 150", "1 dal fry 90", "2 paneer 120", "4 roti 15"]) {
+    assert.deepEqual(parseOrderExtras(line).charges, [], line);
+    assert.equal(parseOrderExtras(line).rest, line);
+  }
+});
+
+test("the seller's own list wins over the charge word", () => {
+  // A shop that genuinely sells "service tea" must not have it billed as a
+  // Service charge, which no discount would touch.
+  const sellsIt = (p: string) => p === "service tea";
+  assert.deepEqual(parseOrderExtras("service tea 40", sellsIt).charges, []);
+  assert.equal(parseOrderExtras("service tea 40", sellsIt).rest, "service tea 40");
+});

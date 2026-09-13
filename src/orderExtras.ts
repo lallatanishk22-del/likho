@@ -70,7 +70,14 @@ function titleCaseName(name: string): string {
   return name.replace(/\b[a-z]/g, (c) => c.toUpperCase()).trim();
 }
 
-export function parseOrderExtras(text: string): OrderExtras {
+// `isProduct` lets the caller consult the seller's price list without this
+// file ever touching the database — the same shape as the numeral expander.
+// It defaults to "nothing is a product", which keeps every existing caller
+// and every pure test behaving exactly as before.
+export function parseOrderExtras(
+  text: string,
+  isProduct: (phrase: string) => boolean = () => false,
+): OrderExtras {
   const charges: BillCharge[] = [];
   let paymentMethod: string | null = null;
   let customer: string | null = null;
@@ -102,16 +109,35 @@ export function parseOrderExtras(text: string): OrderExtras {
       continue;
     }
 
-    // "delivery 30" / "30 delivery" / "packing charge 20"
+    // "delivery 30" / "30 delivery" / "packing charge 20" / "home delivery 50"
+    //
+    // Reported: "home delivery 50" was SILENTLY DROPPED. The charge word
+    // had to be the whole phrase, so two words matched nothing, the line
+    // went to the model as an item, the model produced no item for it, and
+    // a Rs 50 charge disappeared from a bill that looked complete. The
+    // seller thought they had billed Rs 970.
+    //
+    // A charge word ANYWHERE in the phrase is enough — the same move as
+    // finding a product inside "plate paneer tikka". Sellers write "home
+    // delivery", "extra packing", "delivery charges", and the word that
+    // identifies the fee is rarely alone.
     const chargeMatch =
-      line.match(/^([a-z]+)(?:\s+charges?|\s+fee)?\s+(?:rs\.?|₹)?\s*(\d+(?:\.\d{1,2})?)$/i) ??
-      line.match(/^(?:rs\.?|₹)?\s*(\d+(?:\.\d{1,2})?)\s+([a-z]+)(?:\s+charges?|\s+fee)?$/i);
+      line.match(/^(.+?)\s+(?:rs\.?|₹)?\s*(\d+(?:\.\d{1,2})?)$/i) ??
+      line.match(/^(?:rs\.?|₹)?\s*(\d+(?:\.\d{1,2})?)\s+(.+)$/i);
     if (chargeMatch) {
       const [a, b] = [chargeMatch[1]!, chargeMatch[2]!];
-      const word = (/^\d/.test(a) ? b : a).toLowerCase();
-      const amount = Number(/^\d/.test(a) ? a : b);
-      const label = CHARGE_WORDS[word];
-      if (label && Number.isFinite(amount)) {
+      const numberFirst = /^[\d.]+$/.test(a);
+      const phrase = (numberFirst ? b : a).toLowerCase().trim();
+      const amount = Number(numberFirst ? a : b);
+
+      // THE GUARD: the seller's own list wins. If the phrase names
+      // something they sell, it is an item at that price, never a fee —
+      // otherwise a shop selling "service tea" would bill it as a Service
+      // charge that no discount touches.
+      const words = phrase.replace(/\b(charges?|fees?)\b/gi, " ").split(/\s+/).filter(Boolean);
+      const label = words.map((w) => CHARGE_WORDS[w]).find((l) => l !== undefined);
+
+      if (label && Number.isFinite(amount) && !isProduct(phrase)) {
         charges.push({ label, amount });
         continue;
       }
