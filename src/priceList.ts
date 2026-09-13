@@ -62,10 +62,30 @@ function toRuns(tokens: string[]): Run[] {
 // half the other.
 function parseLine(line: string): PriceListParse {
   const tokens = line.split(/\s+/).filter((t) => t.length > 0);
-  const runs = toRuns(tokens);
+  let runs = toRuns(tokens);
 
   if (runs.length === 0) return { entries: [], unreadable: [] };
   if (runs.length === 1) return { entries: [], unreadable: [line] };
+
+  // RULE A: A NUMBER BEFORE THE NAME, WHEN THE LINE ALSO ENDS IN ONE, IS A
+  // QUANTITY.
+  //
+  // Reported: "3 thali 150" saved THALI AT Rs 3 and discarded the 150 —
+  // then offered to drop paneer from Rs 100 to Rs 2. The line was read as
+  // price-first because it STARTS with a number, and "decide once per
+  // line, from whichever comes first" cannot see the number at the end.
+  //
+  // A price list never says "price name price". Ending in a number is what
+  // separates the two shapes, so "150 panner 20 lassi" is still read
+  // price-first: it does not end in a price.
+  if (
+    runs.length >= 3 &&
+    runs.length % 2 === 1 &&
+    runs[0]!.type === "price" &&
+    runs[runs.length - 1]!.type === "price"
+  ) {
+    runs = runs.slice(1);
+  }
 
   const priceFirst = runs[0]!.type === "price";
   const entries: PriceEntry[] = [];
@@ -89,9 +109,19 @@ function parseLine(line: string): PriceListParse {
     entries.push({ name, price: priceRun.value });
   }
 
-  // An odd trailing run is a name with no price, or a price with no name.
+  // RULE B: EVERY NUMBER ON THE LINE MUST BE ACCOUNTED FOR.
+  //
+  // A leftover NAME is safe — a name with no price cannot set a wrong
+  // price, so the rest of the line still saves. A leftover NUMBER is not:
+  // it means one of the numbers on this line was used as a price and
+  // another was silently thrown away, and nothing here can say which was
+  // which. "paneer 220 30" is refused rather than guessed at.
   if (runs.length % 2 === 1) {
-    unreadable.push(describe(runs[runs.length - 1]!));
+    const trailing = runs[runs.length - 1]!;
+    if (trailing.type === "price") {
+      return { entries: [], unreadable: [line] };
+    }
+    unreadable.push(describe(trailing));
   }
 
   return { entries, unreadable };

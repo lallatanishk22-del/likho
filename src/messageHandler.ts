@@ -236,6 +236,18 @@ async function handleAdd(businessId: string, args: string): Promise<Reply> {
     // against data already loaded.
     const index = buildCatalogIndex(before);
     for (const fragment of unreadable) {
+      // A BARE NUMBER IS NOT A PRODUCT NAME. "3 thali 150" once left "150"
+      // behind and the reply asked for the price of "150", offering to
+      // save it as "150 100". Whatever went wrong on that line, the answer
+      // is never to name a product after a number.
+      if (/^\s*(?:₹|rs\.?)?\d+(?:\.\d{1,2})?\s*$/i.test(fragment)) {
+        parts.push(
+          `I couldn't place ${formatRupees(Number(fragment.replace(/[^\d.]/g, "")))} ` +
+            `— a price needs a name beside it.\n\nSend it as:  paneer ${fragment.replace(/[^\d.]/g, "")}`,
+        );
+        continue;
+      }
+
       const existing = findProduct(fragment, index);
       if (existing && existing !== "ambiguous") {
         const sameSpelling = existing.product.name.toLowerCase() === fragment.toLowerCase();

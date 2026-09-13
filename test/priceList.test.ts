@@ -154,3 +154,105 @@ test("one bad line disqualifies the whole message", () => {
   // one thing, with no sign of which half.
   assert.equal(readsAsPriceList("paneer 220\n2 lassi"), false);
 });
+
+// --- A QUANTITY IS NOT A PRICE ------------------------------------------
+//
+// Reported. The seller sent, with /add on the last line:
+//
+//   3 thali 150
+//   2 paneer 120
+//   1 dal fry 90
+//   4 roti 15
+//   1 rice 80
+//
+// Every line was read price-first because it STARTS with a number, so
+// thali saved at ₹3, dal fry at ₹1, rice at ₹1 — and the real prices were
+// reported back as unreadable fragments called "150" and "90". It then
+// offered to drop paneer from ₹100 to ₹2.
+//
+// Nothing here was near-missed or mis-modelled. It was arithmetic on the
+// wrong number, which is the one failure a billing product cannot have.
+
+test("the reported list saves the price, not the quantity", () => {
+  const { entries, unreadable } = parsePriceList(
+    "3 thali 150\n2 paneer 120\n1 dal fry 90\n4 roti 15\n1 rice 80",
+  );
+  assert.deepEqual(entries, [
+    { name: "thali", price: 150 },
+    { name: "paneer", price: 120 },
+    { name: "dal fry", price: 90 },
+    { name: "roti", price: 15 },
+    { name: "rice", price: 80 },
+  ]);
+  assert.deepEqual(unreadable, [], "the real prices were thrown away as junk");
+});
+
+test("no saved price is ever a single-digit quantity from the line", () => {
+  // The shape of the damage, stated directly: if the line contains a
+  // bigger number, the small leading one is never the price.
+  for (const [line, name, price] of [
+    ["3 thali 150", "thali", 150],
+    ["1 rice 80", "rice", 80],
+    ["12 paneer roll 240", "paneer roll", 240],
+  ] as [string, string, number][]) {
+    assert.deepEqual(parsePriceList(line).entries, [{ name, price }], line);
+  }
+});
+
+// --- The shape that must NOT change -------------------------------------
+
+test("price-first still works when the line does not end in a number", () => {
+  // "150 panner 20 lassi" is a real way to write a price list, and the
+  // fix must not take the 150 for a quantity.
+  assert.deepEqual(parsePriceList("150 panner 20 lassi").entries, [
+    { name: "panner", price: 150 },
+    { name: "lassi", price: 20 },
+  ]);
+});
+
+test("name-first is untouched", () => {
+  assert.deepEqual(parsePriceList("panner 150 lassi 20").entries, [
+    { name: "panner", price: 150 },
+    { name: "lassi", price: 20 },
+  ]);
+});
+
+test("a plain two-token line is untouched", () => {
+  assert.deepEqual(parsePriceList("paneer 220").entries, [{ name: "paneer", price: 220 }]);
+  assert.deepEqual(parsePriceList("220 paneer").entries, [{ name: "paneer", price: 220 }]);
+});
+
+// --- EVERY NUMBER MUST BE ACCOUNTED FOR ---------------------------------
+//
+// The old parser saved from a line it had only half understood. That is
+// how ₹3 thali got written while 150 sat in the same line unexplained.
+
+test("a line with a number it cannot place saves NOTHING from that line", () => {
+  const { entries, unreadable } = parsePriceList("paneer 220 30");
+  assert.deepEqual(entries, [], "a half-understood money line was saved");
+  assert.deepEqual(unreadable, ["paneer 220 30"]);
+});
+
+test("one bad line does not discard the good ones", () => {
+  // Partial success across LINES stays — it is partial success WITHIN a
+  // line that was dangerous.
+  const { entries, unreadable } = parsePriceList("paneer 220\nchai 220 30\nlassi 80");
+  assert.deepEqual(entries, [{ name: "paneer", price: 220 }, { name: "lassi", price: 80 }]);
+  assert.deepEqual(unreadable, ["chai 220 30"]);
+});
+
+test("a leftover NAME is still safe, and still saves the rest", () => {
+  // A name with no price cannot set a wrong price, so it is only a
+  // question — not a reason to refuse the line.
+  const { entries, unreadable } = parsePriceList("paneer 220 lassi");
+  assert.deepEqual(entries, [{ name: "paneer", price: 220 }]);
+  assert.deepEqual(unreadable, ["lassi"]);
+});
+
+test("a bare number never becomes a product", () => {
+  for (const line of ["3 thali 150", "paneer 220 30", "150"]) {
+    for (const e of parsePriceList(line).entries) {
+      assert.ok(!/^\d+$/.test(e.name), `${line} produced a product named "${e.name}"`);
+    }
+  }
+});
