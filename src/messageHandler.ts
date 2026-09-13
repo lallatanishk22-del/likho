@@ -31,6 +31,7 @@ import { parseOrderExtras } from "./orderExtras.js";
 import { expandHindiNumerals, hasNumeralWord } from "./hindiNumerals.js";
 import { unusedNumbers } from "./unusedNumbers.js";
 import { leadingCustomerName } from "./leadingName.js";
+import { stripHonorifics } from "./honorific.js";
 import { auditPriceList } from "./priceListAudit.js";
 import {
   handleCustomerHistory, handleOutstanding, handleStatement, handleSettle,
@@ -898,8 +899,11 @@ async function handleOrder(
     // An explicit "customer Rahul" line wins, then whatever the model
     // found, and only then position. The fallback can never overrule an
     // extraction — see leadingName.ts.
-    const resolvedCustomer =
+    const namedCustomer =
       extras.customer ?? parsed.customer ?? leadingCustomerName(orderText, namesAProduct);
+    // "Rahul Bhai" and "Rahul" are one person. Two records split his
+    // history and make his outstanding wrong in both — see honorific.ts.
+    const resolvedCustomer = namedCustomer ? stripHonorifics(namedCustomer) : namedCustomer;
     const withCustomer =
       resolvedCustomer !== parsed.customer ? { ...parsed, customer: resolvedCustomer } : parsed;
     const stored = await createBillSession(

@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { resolvePrices } from "../src/catalog.js";
 import { parsePriceList } from "../src/priceList.js";
-import { parseOrderExtras } from "../src/orderExtras.js";
+import { parseOrderExtras, parseAdvancePaid } from "../src/orderExtras.js";
+import { stripHonorifics } from "../src/honorific.js";
 
 // Five bugs found by auditing a day's work against itself. Every one was
 // shipped, tested, and wrong — so each is pinned here by the behaviour
@@ -104,4 +105,78 @@ test("the price-first shapes that always worked still work", () => {
     { name: "panner", price: 150 },
     { name: "lassi", price: 20 },
   ]);
+});
+
+// --- 6. A charge word and a number, wherever the number sits -------------
+//
+// "ghar bhejna hai 30 lagega" — a ₹30 home delivery — was not read. The
+// matcher required the number at one END of the line, so it also missed
+// "delivery 30 lagega" and "packing 20 extra". Plain English, a known
+// charge word, and still nothing: the gap was STRUCTURE, not vocabulary.
+
+const sellsIt = (p: string) =>
+  ["paneer roll", "coke", "samosa", "chai", "ghar ka khana", "service tea"].includes(p);
+
+test("the number may sit in the middle of a charge line", () => {
+  for (const [line, label, amount] of [
+    ["ghar bhejna hai 30 lagega", "Delivery", 30],
+    ["delivery 30 lagega", "Delivery", 30],
+    ["packing 20 extra", "Packing", 20],
+    ["delivery 30", "Delivery", 30],
+    ["30 delivery", "Delivery", 30],
+  ] as [string, string, number][]) {
+    assert.deepEqual(parseOrderExtras(line, sellsIt).charges, [{ label, amount }], line);
+  }
+});
+
+test("one number is required, so a phone number and an item line are safe", () => {
+  for (const line of ["2 paneer 30", "call me on 98200", "3 chai bhejna"]) {
+    assert.deepEqual(parseOrderExtras(line, sellsIt).charges, [], line);
+    assert.equal(parseOrderExtras(line, sellsIt).rest, line, line);
+  }
+});
+
+test("the price list still overrules a charge word", () => {
+  // A shop selling "ghar ka khana" or "service tea" bills them as items.
+  for (const line of ["ghar ka khana 100", "service tea 40"]) {
+    assert.deepEqual(parseOrderExtras(line, sellsIt).charges, [], line);
+  }
+});
+
+test("a payment word alone still sets only the method", () => {
+  // The charge rewrite deleted this branch once. It is load-bearing.
+  const e = parseOrderExtras("upi", sellsIt);
+  assert.equal(e.paymentMethod, "UPI");
+  assert.equal(e.advancePaid, null);
+});
+
+// --- 7. A bill reference is not an amount --------------------------------
+
+test("'#1042 paid' is not a payment of ₹1042", () => {
+  assert.equal(parseAdvancePaid("#1042 paid"), null);
+  assert.equal(parseAdvancePaid("500 diya hai"), 500);
+});
+
+// --- 8. "Rahul Bhai" and "Rahul" are one person --------------------------
+//
+// Two customer records split his history, and his outstanding comes out
+// wrong in BOTH. The seller never sees the cause: both names look right.
+
+test("honorifics are stripped from either end", () => {
+  assert.equal(stripHonorifics("Rahul Bhai"), "Rahul");
+  assert.equal(stripHonorifics("Bhaiya Suresh"), "Suresh");
+  assert.equal(stripHonorifics("Pooja Didi"), "Pooja");
+  assert.equal(stripHonorifics("Mr Sharma"), "Sharma");
+});
+
+test("a real name is never touched", () => {
+  for (const n of ["Rahul", "Ria Bhanushali", "Sana", "Meena"]) {
+    assert.equal(stripHonorifics(n), n, n);
+  }
+});
+
+test("a name that is ONLY an honorific is kept", () => {
+  // An odd customer name is recoverable; a nameless bill is not.
+  assert.equal(stripHonorifics("Bhaiya"), "Bhaiya");
+  assert.equal(stripHonorifics("ji"), "ji");
 });

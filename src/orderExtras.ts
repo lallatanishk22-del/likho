@@ -47,6 +47,10 @@ const CHARGE_WORDS: Record<string, string> = {
   delivary: "Delivery",
   dilivery: "Delivery",
   shipping: "Delivery",
+  ghar: "Delivery",
+  pohochana: "Delivery",
+  pahuchana: "Delivery",
+  pahunchana: "Delivery",
   packing: "Packing",
   packaging: "Packing",
   container: "Packing",
@@ -75,8 +79,10 @@ export function parseAdvancePaid(line: string): number | null {
   if (!PAID_WORDS.test(line)) return null;
   // The amount must be adjacent to the word, so "3 paneer roll 120 diya"
   // cannot be read as a payment of 120 for an order line.
+  // A "#" makes the number a BILL REFERENCE, not money: "#1042 paid" was
+  // being read as a payment of Rs 1042.
   const near =
-    line.match(/(?:rs\.?|₹)?\s*(\d+(?:\.\d{1,2})?)\s+\S{0,3}\s*(?:diya|diye|dedia|dediya|de\s*diya|dia|paid|given|gave|jama|bhara|advance)/i) ??
+    line.match(/(?<![#\d])(?:rs\.?|₹)?\s*(\d+(?:\.\d{1,2})?)\s+\S{0,3}\s*(?:diya|diye|dedia|dediya|de\s*diya|dia|paid|given|gave|jama|bhara|advance)/i) ??
     line.match(/(?:paid|advance|adv|jama)\s*[:\-]?\s*(?:rs\.?|₹)?\s*(\d+(?:\.\d{1,2})?)/i);
   if (!near) return null;
   const amount = Number(near[1]);
@@ -215,35 +221,36 @@ export function parseOrderExtras(
       continue;
     }
 
-    // "delivery 30" / "30 delivery" / "packing charge 20" / "home delivery 50"
+    // A CHARGE IS A CHARGE WORD AND A NUMBER, WHEREVER THE NUMBER SITS.
     //
-    // Reported: "home delivery 50" was SILENTLY DROPPED. The charge word
-    // had to be the whole phrase, so two words matched nothing, the line
-    // went to the model as an item, the model produced no item for it, and
-    // a Rs 50 charge disappeared from a bill that looked complete. The
-    // seller thought they had billed Rs 970.
+    // Reported: "ghar bhejna hai 30 lagega" — a Rs 30 home delivery — was
+    // not read. The charge matcher required the number at one END of the
+    // line, so it also missed "delivery 30 lagega" and "packing 20 extra".
+    // Plain English, a known charge word, and still nothing: the gap was
+    // structure, not vocabulary.
     //
-    // A charge word ANYWHERE in the phrase is enough — the same move as
-    // finding a product inside "plate paneer tikka". Sellers write "home
-    // delivery", "extra packing", "delivery charges", and the word that
-    // identifies the fee is rarely alone.
-    const chargeMatch =
-      line.match(/^(.+?)\s+(?:rs\.?|₹)?\s*(\d+(?:\.\d{1,2})?)$/i) ??
-      line.match(/^(?:rs\.?|₹)?\s*(\d+(?:\.\d{1,2})?)\s+(.+)$/i);
-    if (chargeMatch) {
-      const [a, b] = [chargeMatch[1]!, chargeMatch[2]!];
-      const numberFirst = /^[\d.]+$/.test(a);
-      const phrase = (numberFirst ? b : a).toLowerCase().trim();
-      const amount = Number(numberFirst ? a : b);
+    // So: exactly one number anywhere in the line, a charge word among the
+    // remaining words, and those words must not name something the seller
+    // sells. Exactly one number is what keeps a phone number or an item
+    // line out — "2 paneer 30" has two, and "call me on 98200" has no
+    // charge word.
+    const chargeNumbers = [...line.matchAll(/(?:rs\.?|₹)?\s*(\d+(?:\.\d{1,2})?)/gi)];
+    if (chargeNumbers.length === 1) {
+      const amount = Number(chargeNumbers[0]![1]);
+      const phrase = line
+        .replace(chargeNumbers[0]![0], " ")
+        .toLowerCase()
+        .replace(/\b(charges?|fees?)\b/gi, " ")
+        .replace(/\s{2,}/g, " ")
+        .trim();
+      const words = phrase.split(/\s+/).filter(Boolean);
+      const label = words.map((w) => CHARGE_WORDS[w]).find((l) => l !== undefined);
 
       // THE GUARD: the seller's own list wins. If the phrase names
       // something they sell, it is an item at that price, never a fee —
       // otherwise a shop selling "service tea" would bill it as a Service
       // charge that no discount touches.
-      const words = phrase.replace(/\b(charges?|fees?)\b/gi, " ").split(/\s+/).filter(Boolean);
-      const label = words.map((w) => CHARGE_WORDS[w]).find((l) => l !== undefined);
-
-      if (label && Number.isFinite(amount) && !isProduct(phrase)) {
+      if (label && Number.isFinite(amount) && amount > 0 && !isProduct(phrase)) {
         charges.push({ label, amount });
         continue;
       }
