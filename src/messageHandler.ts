@@ -921,14 +921,34 @@ async function handleOrder(
       chargeAmounts: extras.charges.map((c) => c.amount),
       discountPercent: statedDiscount ?? parsed.discountPercent ?? null,
       noteTexts: extras.notes.map((n) => n.text),
+      // An advance explains its own number: it is answered above, not lost.
+      chargeAmountsExtra: extras.advancePaid !== null ? [extras.advancePaid] : [],
     });
     const leftOverNote =
       leftOver.length > 0
         ? `\n\nI didn't use: ${leftOver.join(", ")}. If that's a charge, send:  delivery ${leftOver[0]}`
         : "";
 
-    const note = `${nudge}${leftOverNote}`.trim();
-    return billReply(stored, note.length > 0 ? note : undefined);
+    // "500 diya hai baki kitna" ASKS SOMETHING. Answer it — the balance is
+    // arithmetic on figures already computed — but do not record the money.
+    // The seller taps to do that, exactly as they would from any bill.
+    const advance = extras.advancePaid;
+    const advanceNote =
+      advance !== null
+        ? `\n\n${formatRupees(advance)} received \u2014 ${formatRupees(Math.max(0, bill.total - advance))} still due.` +
+          (advance > bill.total ? ` That is ${formatRupees(advance - bill.total)} more than the bill.` : "") +
+          `\nTap below to record it.`
+        : "";
+
+    const note = `${nudge}${leftOverNote}${advanceNote}`.trim();
+    const reply = billReply(stored, note.length > 0 ? note : undefined);
+    if (advance !== null) {
+      reply.actions = [
+        { label: `\u{1f4b0} Record ${formatRupees(advance)} paid`, action: `paidamt:${stored.session.bill_no}:${advance}` },
+        ...(reply.actions ?? []),
+      ];
+    }
+    return reply;
   } catch (err) {
     // An ambiguous name is a question with a known set of answers. Offer
     // them, and remember the message so the answer can re-run it — being
@@ -1753,7 +1773,7 @@ export async function handleAction(incoming: IncomingMessage, action: string): P
     }
   }
 
-  const [verb, rawNo] = action.split(":");
+  const [verb, rawNo, rawAmount] = action.split(":");
   const billNo = rawNo && /^\d+$/.test(rawNo) ? Number(rawNo) : null;
 
   try {
@@ -1762,6 +1782,14 @@ export async function handleAction(incoming: IncomingMessage, action: string): P
         return await handleConfirm(businessId, billNo);
       case "paid":
         return await handlePayment(businessId, billNo, null);
+      case "paidamt": {
+        // A part-payment the seller stated with the order ("500 diya hai").
+        // It reaches the ledger only when they tap — a seller relaying what
+        // a customer told them is still hearsay, and a payment is a
+        // financial record.
+        const amount = rawAmount && /^\d+(\.\d{1,2})?$/.test(rawAmount) ? Number(rawAmount) : null;
+        return await handlePayment(businessId, billNo, amount);
+      }
       case "pdf":
         return await handleBillPdf(businessId, billNo);
       default:

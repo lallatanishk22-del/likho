@@ -21,6 +21,9 @@ export interface BillNumberUse {
   // Instructions captured off the message. "deliver by 8pm" explains its
   // own 8 — it is a clock time, not a number the bill failed to use.
   noteTexts?: string[];
+  // Numbers explained by something other than a bill line — an advance the
+  // seller stated with the order, for instance.
+  chargeAmountsExtra?: number[];
 }
 
 // Numbers written as digits, ignoring percentages (a discount is handled
@@ -44,6 +47,7 @@ export function unusedNumbers(message: string, use: BillNumberUse): number[] {
     ...use.quantities,
     ...use.unitPrices,
     ...use.chargeAmounts,
+    ...(use.chargeAmountsExtra ?? []),
   ]);
   if (use.discountPercent !== null) accounted.add(use.discountPercent);
   for (const note of use.noteTexts ?? []) {

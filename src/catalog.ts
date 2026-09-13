@@ -205,6 +205,53 @@ export function findProductByContainment(
   return null;
 }
 
+// "WOH CHEESE WALA BHI" — A REFERENCE, NOT A NAME.
+//
+// Hindi points at things: "woh cheese wala" is "that cheese one", "paneer
+// wali dish" is "the paneer one". The seller is naming a product they
+// already sell, indirectly. Reported as an item, it billed a brand new
+// product called "Cheese Wala Bhi" — which then PRINTS on the customer's
+// bill.
+//
+// Containment cannot help: it looks for a catalog name inside the phrase,
+// and here the phrase is a FRAGMENT of the catalog name, not the reverse.
+// "cheese" is part of "cheese sandwich"; "cheese wala bhi" contains no
+// product at all.
+//
+// So look the other way round: does any WORD of the phrase pick out a
+// product? This needs no list of Hindi particles — "wala", "bhi", "woh"
+// and "arey" match nothing in the price list and drop out on their own,
+// while "cheese" matches exactly one thing. The words that mean something
+// are the words the seller actually sells.
+//
+//   "woh cheese wala bhi"  ->  cheese  ->  Cheese Sandwich
+//   "woh paneer wala"      ->  paneer  ->  two products -> ASK
+//
+// Two candidates is an ambiguity, not a coin toss — the seller gets
+// buttons. A token under three letters is ignored: "ka" and "hi" are noise
+// and would match half a menu by accident.
+export function findProductByFragment(
+  name: string,
+  index: CatalogIndex,
+): CatalogMatch | "ambiguous" | null {
+  const tokens = [...new Set(
+    name.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((t) => t.length >= 3),
+  )];
+  if (tokens.length === 0) return null;
+
+  const hits = new Map<string, CatalogProduct>();
+  for (const token of tokens) {
+    for (const { key, product } of index.allKeys) {
+      if (key.split(/\s+/).includes(token)) hits.set(product.id, product);
+    }
+  }
+
+  const found = [...hits.values()];
+  if (found.length === 1) return { product: found[0]!, kind: "near" };
+  if (found.length > 1) return "ambiguous";
+  return null;
+}
+
 export function findProduct(
   name: string,
   index: CatalogIndex,
@@ -330,8 +377,18 @@ export function resolvePrices(
       // A stated price is the seller's explicit instruction, so it bills
       // even for an item that isn't in the price list at all. The lookup
       // here only attaches a product id when one is unambiguous.
-      const found = findProduct(item.name, index);
-      const match = found !== null && found !== "ambiguous" ? found.product : null;
+      //
+      // The NAME still goes through every tier, because the name is what
+      // PRINTS on the customer's bill. "arey woh cheese wala bhi 1 60 ka"
+      // billed a product called "Cheese Wala Bhi" — the price was right
+      // and the document was embarrassing. A stated price settles the
+      // money; it says nothing about what the thing is called.
+      const direct = findProduct(item.name, index);
+      const byName =
+        direct ??
+        findProductByContainment(item.name, index) ??
+        findProductByFragment(item.name, index);
+      const match = byName !== null && byName !== "ambiguous" ? byName.product : null;
       resolved.push({
         name: match ? match.name : item.name,
         quantity: item.quantity,
@@ -361,7 +418,12 @@ export function resolvePrices(
       // Before giving up: is a product the seller DOES sell sitting inside
       // the name the model reported? "plate paneer tikka" is Paneer Tikka
       // wrapped in a container word.
-      const inside = findProductByContainment(item.name, index);
+      // Containment first ("plate paneer tikka" -> the product is INSIDE
+      // the phrase), then fragment ("woh cheese wala" -> the phrase is a
+      // fragment OF the product). Containment is the stronger signal, so
+      // it is never overruled by the looser one.
+      const contained = findProductByContainment(item.name, index);
+      const inside = contained ?? findProductByFragment(item.name, index);
       if (inside !== null && inside !== "ambiguous") {
         resolved.push({
           name: inside.product.name,

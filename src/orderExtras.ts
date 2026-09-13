@@ -25,6 +25,10 @@ import { classifyNote, dedupeNotes } from "./orderNotes.js";
 
 export interface OrderExtras {
   charges: BillCharge[];
+  // Money the customer has ALREADY handed over, stated with the order:
+  // "500 diya hai baki kitna". Never applied automatically — see
+  // parseAdvancePaid below and the button the order handler offers.
+  advancePaid: number | null;
   paymentMethod: string | null;
   customer: string | null;
   // What the seller said that is not money: "less spicy", "deliver by
@@ -52,6 +56,33 @@ const CHARGE_WORDS: Record<string, string> = {
 };
 
 // Payment modes, as a seller writes them.
+// "500 diya hai" — money already handed over, stated in the same breath as
+// the order. Reported: it came back as "I didn't use: 500. If that's a
+// charge, send: delivery 500", which is the opposite of what was said.
+//
+// A closed list, like CHARGE_WORDS and PAYMENT_WORDS. These are the words
+// for HANDING OVER money, and the amount must sit beside one of them —
+// a bare number is never read as a payment.
+//
+// It is DETECTED here and applied nowhere. A payment is a financial record
+// and the seller confirms it with a tap, exactly as they do from a bill's
+// own button. "Do not attempt to infer a successful payment" is the rule,
+// and a seller relaying what a customer told them is still hearsay.
+const PAID_WORDS =
+  /\b(diya|diye|diyaa|dedia|dediya|de\s*diya|de\s*diye|dia|paid|pay\s*kiya|payed|given|gave|advance|adv|jama|bhara)\b/i;
+
+export function parseAdvancePaid(line: string): number | null {
+  if (!PAID_WORDS.test(line)) return null;
+  // The amount must be adjacent to the word, so "3 paneer roll 120 diya"
+  // cannot be read as a payment of 120 for an order line.
+  const near =
+    line.match(/(?:rs\.?|₹)?\s*(\d+(?:\.\d{1,2})?)\s+\S{0,3}\s*(?:diya|diye|dedia|dediya|de\s*diya|dia|paid|given|gave|jama|bhara|advance)/i) ??
+    line.match(/(?:paid|advance|adv|jama)\s*[:\-]?\s*(?:rs\.?|₹)?\s*(\d+(?:\.\d{1,2})?)/i);
+  if (!near) return null;
+  const amount = Number(near[1]);
+  return Number.isFinite(amount) && amount > 0 ? amount : null;
+}
+
 const PAYMENT_WORDS: Record<string, string> = {
   upi: "UPI",
   gpay: "UPI",
@@ -85,6 +116,7 @@ export function parseOrderExtras(
 ): OrderExtras {
   const charges: BillCharge[] = [];
   const notes: BillNote[] = [];
+  let advancePaid: number | null = null;
   let paymentMethod: string | null = null;
   let customer: string | null = null;
 
@@ -112,6 +144,16 @@ export function parseOrderExtras(
     const namedCustomer = line.match(/^(?:customer|cust|name|for)\s*:?\s+(.+)$/i);
     if (namedCustomer && !/\d/.test(namedCustomer[1]!)) {
       customer = titleCaseName(namedCustomer[1]!);
+      continue;
+    }
+
+    // "500 diya hai baki kitna" — money already handed over. Checked
+    // BEFORE charges, because "500 diya" would otherwise be nothing the
+    // charge matcher recognises and would fall through to the model as an
+    // item worth 500.
+    const advance = parseAdvancePaid(line);
+    if (advance !== null) {
+      advancePaid = advance;
       continue;
     }
 
@@ -172,6 +214,7 @@ export function parseOrderExtras(
 
   return {
     charges,
+    advancePaid,
     paymentMethod,
     customer,
     notes: dedupeNotes(notes),
