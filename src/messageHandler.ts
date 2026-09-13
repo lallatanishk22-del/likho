@@ -30,6 +30,7 @@ import { parseDiscount } from "./discount.js";
 import { parseOrderExtras } from "./orderExtras.js";
 import { expandHindiNumerals, hasNumeralWord } from "./hindiNumerals.js";
 import { unusedNumbers } from "./unusedNumbers.js";
+import { leadingCustomerName } from "./leadingName.js";
 import { auditPriceList } from "./priceListAudit.js";
 import {
   handleCustomerHistory, handleOutstanding, handleStatement, handleSettle,
@@ -894,7 +895,13 @@ async function handleOrder(
     // rather than a one-off message.
     // An explicit "customer Rahul" line wins over whatever the model
     // inferred — the seller said it outright.
-    const withCustomer = extras.customer ? { ...parsed, customer: extras.customer } : parsed;
+    // An explicit "customer Rahul" line wins, then whatever the model
+    // found, and only then position. The fallback can never overrule an
+    // extraction — see leadingName.ts.
+    const resolvedCustomer =
+      extras.customer ?? parsed.customer ?? leadingCustomerName(orderText, namesAProduct);
+    const withCustomer =
+      resolvedCustomer !== parsed.customer ? { ...parsed, customer: resolvedCustomer } : parsed;
     const stored = await createBillSession(
       businessId, withCustomer, bill, sourceMessageId, extras.paymentMethod, extras.notes,
     );

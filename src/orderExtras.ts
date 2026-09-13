@@ -147,6 +147,50 @@ export function parseOrderExtras(
       continue;
     }
 
+    // A NAMED PAYMENT METHOD BEATS A BARE AMOUNT. "paid 300 cash" states
+    // both; if the advance check below ran first it would take the 300 and
+    // throw the method away.
+    // A PAYMENT MAY CARRY ITS AMOUNT: "upi 970", "cash 500", "970 by upi".
+    //
+    // Reported: "upi 970" matched nothing. It was not a charge (upi is not
+    // a charge word), not a note (it carries money), and the payment check
+    // below required the line to be a payment word ALONE. So it reached
+    // the extractor, which read the line break in
+    //
+    //   ... 4 roti 15
+    //   upi 970
+    //
+    // as "15 upi" — quantity fifteen of an item called upi — and the whole
+    // order was refused for an item that does not exist.
+    //
+    // Strict on purpose: with the amount removed, what is LEFT must be
+    // nothing but payment words. "2 upi 40" is not a payment.
+    // Three shapes, so the leading verb is removed first and the remaining
+    // two are matched: "upi 970", "970 by upi", and "paid 300 cash" —
+    // which is neither until "paid" is taken off the front.
+    const payBody = line.replace(/^(paid|pay|payment|mode)\s*:?\s*/i, "").trim();
+    const withAmount =
+      payBody.match(/^(.+?)\s+(?:rs\.?|₹)?\s*(\d+(?:\.\d{1,2})?)$/i) ??
+      payBody.match(/^(?:rs\.?|₹)?\s*(\d+(?:\.\d{1,2})?)\s+(.+)$/i);
+    if (withAmount) {
+      const [a, b] = [withAmount[1]!, withAmount[2]!];
+      const numberFirst = /^[\d.]+$/.test(a);
+      const amount = Number(numberFirst ? a : b);
+      const words = (numberFirst ? b : a)
+        .toLowerCase()
+        .replace(/^(paid|pay|payment|mode)\s*:?\s*/i, "")
+        .replace(/\b(by|via|through|se|me|mein)\b/gi, " ")
+        .replace(/\s+/g, "");
+      const withAmountMode = PAYMENT_WORDS[words];
+      if (withAmountMode && Number.isFinite(amount) && amount > 0) {
+        paymentMethod = withAmountMode;
+        // Same rule as "500 diya hai": DETECTED, applied nowhere. The
+        // seller taps to put it in the ledger.
+        advancePaid = amount;
+        continue;
+      }
+    }
+
     // "500 diya hai baki kitna" — money already handed over. Checked
     // BEFORE charges, because "500 diya" would otherwise be nothing the
     // charge matcher recognises and would fall through to the model as an
