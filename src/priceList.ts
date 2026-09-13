@@ -78,11 +78,16 @@ function parseLine(line: string): PriceListParse {
   // A price list never says "price name price". Ending in a number is what
   // separates the two shapes, so "150 panner 20 lassi" is still read
   // price-first: it does not end in a price.
+  // EXACTLY three runs. "3 thali 150" is unambiguous: one name with a
+  // number on each side. "150 panner 20 lassi 80" is not — dropping its
+  // leading price silently produced panner=20 and lassi=80, shifting every
+  // price by one and losing the 150. Longer lines fall to Rule B below and
+  // are refused, which is the honest answer to a genuinely ambiguous line.
   if (
-    runs.length >= 3 &&
-    runs.length % 2 === 1 &&
+    runs.length === 3 &&
     runs[0]!.type === "price" &&
-    runs[runs.length - 1]!.type === "price"
+    runs[1]!.type === "words" &&
+    runs[2]!.type === "price"
   ) {
     runs = runs.slice(1);
   }

@@ -939,19 +939,40 @@ async function handleOrder(
     // "500 diya hai baki kitna" ASKS SOMETHING. Answer it — the balance is
     // arithmetic on figures already computed — but do not record the money.
     // The seller taps to do that, exactly as they would from any bill.
+    // A MISMATCH LEADS. The first version opened with "Rs 0 still due" and
+    // buried "Rs 520 more than the bill" behind it — the reassuring half
+    // first and the half that needs attention second, which is how a
+    // seller moving fast taps the button on a typo.
+    //
+    // And more than the total is not a part-payment. It is a wrong number,
+    // or a number meant for something else, so it is never offered as a
+    // confident amount: recordPayment CLAMPS to the total, and a button
+    // reading "Record Rs 970" that quietly records Rs 450 is a lie.
     const advance = extras.advancePaid;
     const advanceNote =
-      advance !== null
-        ? `\n\n${formatRupees(advance)} received \u2014 ${formatRupees(Math.max(0, bill.total - advance))} still due.` +
-          (advance > bill.total ? ` That is ${formatRupees(advance - bill.total)} more than the bill.` : "") +
-          `\nTap below to record it.`
-        : "";
+      advance === null
+        ? ""
+        : advance > bill.total
+          ? `\n\n\u26a0\ufe0f You said ${formatRupees(advance)}, but this bill is ` +
+            `${formatRupees(bill.total)} \u2014 ${formatRupees(advance - bill.total)} more. ` +
+            `Only ${formatRupees(bill.total)} can be recorded against it.`
+          : advance === bill.total
+            ? `\n\n${formatRupees(advance)} received \u2014 that clears the bill.\nTap below to record it.`
+            : `\n\n${formatRupees(advance)} received \u2014 ` +
+              `${formatRupees(bill.total - advance)} still due.\nTap below to record it.`;
 
     const note = `${nudge}${leftOverNote}${advanceNote}`.trim();
     const reply = billReply(stored, note.length > 0 ? note : undefined);
     if (advance !== null) {
+      // The label states what will actually be recorded, never what was
+      // typed — an overpayment offers the total, which is all the ledger
+      // can hold.
+      const recordable = Math.min(advance, bill.total);
       reply.actions = [
-        { label: `\u{1f4b0} Record ${formatRupees(advance)} paid`, action: `paidamt:${stored.session.bill_no}:${advance}` },
+        {
+          label: `\u{1f4b0} Record ${formatRupees(recordable)} paid`,
+          action: `paidamt:${stored.session.bill_no}:${recordable}`,
+        },
         ...(reply.actions ?? []),
       ];
     }

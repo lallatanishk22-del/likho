@@ -383,12 +383,32 @@ export function resolvePrices(
       // billed a product called "Cheese Wala Bhi" — the price was right
       // and the document was embarrassing. A stated price settles the
       // money; it says nothing about what the thing is called.
+      //
+      // TWO SIGNALS MUST AGREE BEFORE A NAME IS REPLACED.
+      //
+      // An exact or near match is the SAME name, spelled differently, and
+      // is safe on its own. Containment and fragment are not: they share
+      // only a word with the catalog entry, and applied alone here they
+      // renamed every genuinely new item the seller priced by hand —
+      //
+      //   "mango juice 60"  -> billed as Mango Shake
+      //   "cold drink 40"   -> billed as Cold Coffee
+      //   "paneer roll 120" -> billed as Paneer Tikka
+      //
+      // — putting the wrong item on the customer's bill. So a loose match
+      // must be corroborated by the PRICE: "woh cheese wala bhi 1 60 ka"
+      // is Cheese Sandwich because cheese sandwich costs exactly 60. A
+      // different price means a different item, or an override, and either
+      // way the seller's own words are the safer name.
       const direct = findProduct(item.name, index);
-      const byName =
+      const loose =
         direct ??
         findProductByContainment(item.name, index) ??
         findProductByFragment(item.name, index);
-      const match = byName !== null && byName !== "ambiguous" ? byName.product : null;
+      const candidate = loose !== null && loose !== "ambiguous" ? loose.product : null;
+      const corroborated =
+        candidate !== null && (direct !== null || candidate.price === item.unitPrice);
+      const match = corroborated ? candidate : null;
       resolved.push({
         name: match ? match.name : item.name,
         quantity: item.quantity,

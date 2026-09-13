@@ -61,9 +61,17 @@ const CATEGORY_WORDS: { category: NoteCategory; pattern: RegExp }[] = [
   {
     // How it should be cooked. The single most expensive thing to lose —
     // an allergy or a religious restriction lives here.
+    //
+    // INGREDIENT NOUNS ARE NOT INSTRUCTIONS. "butter", "masala", "ghee",
+    // "sugar" and "fresh" were in this list and turned "butter naan" and
+    // "masala chai" into prep NOTES — so a product the seller had not
+    // priced yet vanished out of the order instead of being asked about.
+    // What is left is either a restriction (spicy, onion, garlic, jain,
+    // allergy) or a modifier (less, extra, bina, no X), and "less oil"
+    // still matches on "less".
     category: "prep",
     pattern:
-      /\b(spicy|spice|mirchi|mirch|teekha|tikha|chilli|masala|onion|pyaaz|pyaz|garlic|lehsun|lasun|jain|vegan|ginger|adrak|oil|tel|butter|ghee|sugar|salt|namak|meetha|mitha|sweet|garam|thanda|fresh|well\s*done|raw|kacha|without|bina|less|kam|extra|zyada|no\s+\w+|allergy|allergic)\b/i,
+      /\b(spicy|spice|mirchi|mirch|teekha|tikha|chilli|onion|pyaaz|pyaz|garlic|lehsun|lasun|jain|vegan|well\s*done|without|bina|less|kam|extra|zyada|no\s+\w+|allergy|allergic)\b/i,
   },
 ];
 

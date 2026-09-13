@@ -123,19 +123,33 @@ export function parseOrderExtras(
   const kept: string[] = [];
 
   for (const rawLine of text.split(/\r?\n/)) {
-    // A TABLE NUMBER IS NOT A QUANTITY.
+    // A TABLE NUMBER IS NOT A QUANTITY — BUT A QUANTITY IS.
     //
-    // "room 12 me 3 chai bhejna" was refused: "the message appears to
-    // mention 1 more item(s) (quantities: 12)". The trust layer was right
-    // — 12 was unexplained — but it is a room, not an order of twelve.
+    // "room 12 me 3 chai bhejna" was refused for an unexplained 12. The
+    // first fix stripped <word> <number> outright, which then ate real
+    // orders: "kitchen 2 thali" became "thali" and billed ONE, and
+    // "2 counter 40" became "2". Losing a quantity is far worse than the
+    // refusal it was meant to prevent.
     //
-    // A closed list, for the same reason as CHARGE_WORDS above: these are
-    // the words an Indian restaurant actually numbers, and an unknown word
-    // before a number is far more likely to be a product. The number must
-    // FOLLOW the word; "2 table" is left alone, since a quantity precedes
-    // what it counts.
+    // So the price list decides, as everywhere else: the number is only a
+    // location when what FOLLOWS it is not something the seller sells.
+    // The word list is also cut back to things that genuinely carry a
+    // number in a restaurant — "kitchen", "counter" and "floor" were
+    // guesses, and every guess here costs a quantity.
     const line = rawLine
-      .replace(/\b(table|room|seat|counter|cabin|cabin no|kitchen|floor)\s*(?:no\.?|number|#)?\s*\d{1,3}\b/gi, " ")
+      .replace(/\b(table|room|seat|cabin)\s*(?:no\.?|number|#)?\s*(\d{1,3})\b/gi,
+        (match, _word, _num, offset: number, whole: string) => {
+          // Only the words IMMEDIATELY after the number, and at most two
+          // of them. Looking three ahead let the loose product check find
+          // "chai" inside "me 3 chai" and refuse to strip "room 12" —
+          // containment answers "does this phrase contain a product", and
+          // the question here is "is the next word a product".
+          const after = whole.slice(offset + match.length).trim().split(/\s+/).slice(0, 2);
+          for (let n = after.length; n >= 1; n--) {
+            if (isProduct(after.slice(0, n).join(" ").toLowerCase())) return match;
+          }
+          return " ";
+        })
       .replace(/\s{2,}/g, " ")
       .trim();
     if (line.length === 0) continue;
