@@ -33,6 +33,7 @@ import {
   handleCustomerHistory, handleOutstanding, handleStatement, handleSettle,
 } from "./customerHandlers.js";
 import { HELP, GREETING_REPLY, KNOWN_COMMANDS, splitCommands, type ParsedCommand } from "./commands.js";
+import { suggestFromList } from "./nearName.js";
 export { splitCommands, type ParsedCommand };
 import type {
   Platform, ReplyAction, ReplyPhoto, ReplyDocument, Reply, IncomingMessage,
@@ -1761,10 +1762,17 @@ async function runCommand(
         return await handleSales(businessId, args.length > 0 ? args : trimmed);
       case "/open":
         return await handleOpenBills(businessId);
-      default:
+      default: {
         // An unrecognised slash command is a typo, not an order — never
-        // silently bill it.
-        return { text: `I don't know that command.\n\n${HELP}` };
+        // silently bill it. The same near-match used for product names
+        // names the command they meant, because dumping the whole help
+        // text at someone who mistyped one letter is not an answer.
+        const near = suggestFromList(command.replace(/^\//, ""), KNOWN_COMMANDS.map((c) => c.slice(1)));
+        if (near) {
+          return { text: `I don't know ${command}. Did you mean /${near}?` };
+        }
+        return { text: `I don't know ${command}.\n\n${HELP}` };
+      }
     }
   } catch (err) {
     return { text: `Something went wrong: ${(err as Error).message}` };

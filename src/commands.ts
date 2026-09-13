@@ -8,6 +8,8 @@
 // guess whether "/add mithai 10" was an instruction or part of an order —
 // a question it got wrong repeatedly.
 
+import { suggestFromList } from "./nearName.js";
+
 export const HELP = `Likho \u2014 send me the order, I'll make the bill.
 
 Just type it. No commands needed:
@@ -89,11 +91,51 @@ export function splitCommands(text: string): ParsedCommand[] {
   const trimmed = text.trim();
   if (trimmed.length === 0) return [];
 
-  const hits: { index: number; command: string }[] = [];
-  for (const cmd of KNOWN_COMMANDS) {
-    const pattern = new RegExp(`(^|\\s)(${cmd})(?=\\s|$)`, "gi");
-    for (const m of trimmed.matchAll(pattern)) {
-      hits.push({ index: m.index! + m[1]!.length, command: cmd });
+  // Longest first, so "/removeitem" is never read as "/remove" + "item"
+  // and "/additem" is never read as "/add" + "item".
+  const byLength = [...KNOWN_COMMANDS].sort((a, b) => b.length - a.length);
+  const commandNames = KNOWN_COMMANDS.map((c) => c.slice(1));
+
+  // A slash token: a "/" at the start of the message or after whitespace,
+  // followed by a letter. The letter requirement is what keeps "1/2 kg"
+  // and "2 chai /3 samosa" out of here - those are quantities.
+  const SLASH_TOKEN = /(^|\s)(\/[A-Za-z][A-Za-z0-9_]*)/g;
+
+  // THE GLUE RULE: "/Addbiryani 220" is "/add" with "biryani 220".
+  //
+  // Reported: a seller typed "/Addbiryani 220\nraita 30 each" - the space
+  // after the command was lost, which phone keyboards do constantly. The
+  // old match required whitespace AFTER the command, so nothing matched,
+  // the message fell through to the order parser, the model read
+  // "Addbiryani" as a dish, and the reply said: add it with "/add biryani
+  // 100" - the exact thing the seller had just typed.
+  //
+  // A "/" is not business data. It is the one character a seller types to
+  // say "this is an instruction", so it is resolved here, not interpreted
+  // downstream. Whatever of the token is not the command is its first
+  // argument.
+  const hits: { index: number; command: string; glued: string; end: number }[] = [];
+  for (const m of trimmed.matchAll(SLASH_TOKEN)) {
+    const token = m[2]!;
+    const index = m.index! + m[1]!.length;
+    const lower = token.toLowerCase();
+    // TYPO BEATS GLUE. "/addd" is a misspelling of "/add", not "/add"
+    // carrying an argument called "d" — and the same length-scaled
+    // near-match used for product names is what tells them apart:
+    // "addd" is one slip from "add", "addbiryani" is seven.
+    const exact = byLength.find((c) => lower === c);
+    const typo = exact ? null : suggestFromList(lower.slice(1), commandNames);
+    const command = exact ?? (typo ? undefined : byLength.find((c) => lower.startsWith(c)));
+    if (command) {
+      hits.push({ index, command, glued: token.slice(command.length), end: index + token.length });
+    } else if (index === 0 || typo) {
+      // AN UNKNOWN COMMAND IS A TYPO, NOT AN ORDER.
+      //
+      // Only when the message STARTS with it: that is unambiguously a
+      // seller reaching for a command. A stray slash later in a sentence
+      // is left to the normal language path rather than refusing an order
+      // over punctuation.
+      hits.push({ index, command: lower, glued: "", end: index + token.length });
     }
   }
 
@@ -103,7 +145,7 @@ export function splitCommands(text: string): ParsedCommand[] {
 
   // Text BEFORE the first command belongs to that command. It used to be
   // discarded, which silently dropped the customer from
-  // "ria bhanushali /zbill 3 mudpie" — the bill came out with no name and
+  // "ria bhanushali /zbill 3 mudpie" - the bill came out with no name and
   // nothing indicated why. People put the command where it falls in the
   // sentence; the parser has to read the whole sentence.
   const prefix = trimmed.slice(0, hits[0]!.index).trim();
@@ -111,11 +153,14 @@ export function splitCommands(text: string): ParsedCommand[] {
   const parsed: ParsedCommand[] = [];
   for (let i = 0; i < hits.length; i++) {
     const hit = hits[i]!;
-    const argsStart = hit.index + hit.command.length;
     const argsEnd = i + 1 < hits.length ? hits[i + 1]!.index : trimmed.length;
-    const args = trimmed.slice(argsStart, argsEnd).trim();
+    // The glued remainder keeps its place at the front of the arguments,
+    // and the text after the token keeps its own whitespace - so
+    // "/Addbiryani 220\nraita 30" stays two LINES, which is what the
+    // price-list parser reads.
+    const args = (hit.glued + trimmed.slice(hit.end, argsEnd)).trim();
     parsed.push({
-      command: hit.command.toLowerCase(),
+      command: hit.command,
       args: i === 0 && prefix.length > 0 ? `${prefix} ${args}`.trim() : args,
     });
   }

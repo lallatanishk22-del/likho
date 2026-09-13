@@ -1,97 +1,124 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { splitCommands } from "../src/messageHandler.js";
+import { splitCommands, KNOWN_COMMANDS } from "../src/commands.js";
 
-// THE RULE: one message = a sequence of commands, run in order.
-// These lock in the behaviour of every shape a seller actually types.
+const one = (t: string) => splitCommands(t)[0]!;
 
-test("a single command with arguments", () => {
-  assert.deepEqual(splitCommands("/zbill 2 chai"), [{ command: "/zbill", args: "2 chai" }]);
+// --- THE REPORTED BUG ---------------------------------------------------
+//
+// A seller typed "/Addbiryani 220\nraita 30 each". The space after the
+// command was lost — which phone keyboards do constantly — so nothing
+// matched, the message fell through to the ORDER parser, the model read
+// "Addbiryani" as a dish, and the reply told them to add it by typing
+// "/add biryani 100": the exact thing they had just typed.
+//
+// A "/" is not business data. It is the one character a seller types to
+// say "this is an instruction".
+
+test("a command glued to its first argument still runs", () => {
+  const [cmd] = splitCommands("/Addbiryani 220\nraita 30 each");
+  assert.equal(cmd!.command, "/add");
+  assert.equal(cmd!.args, "biryani 220\nraita 30 each");
 });
 
-test("REGRESSION: /add with one item per line stays ONE command with multiline args", () => {
-  // Previously the newlines collapsed and this became a single product
-  // named "samosa 20 chai 15 paneer roll" priced ₹120.
-  const parsed = splitCommands("/add samosa 20\nchai 15\npaneer roll 120");
-  assert.equal(parsed.length, 1);
-  assert.equal(parsed[0]!.command, "/add");
-  assert.equal(parsed[0]!.args, "samosa 20\nchai 15\npaneer roll 120");
+test("the glued form keeps its LINES, because the price list reads lines", () => {
+  // Flattening this into one line would have made it a single product
+  // called "biryani 220 raita" at ₹30.
+  assert.equal(one("/Addbiryani 220\nraita 30 each").args.split("\n").length, 2);
 });
 
-test("REGRESSION: two commands on ONE line are split", () => {
-  const parsed = splitCommands("/zbill 1 chai 2 paneer roll /add mithai 10");
-  assert.equal(parsed.length, 2);
-  assert.deepEqual(parsed[0], { command: "/zbill", args: "1 chai 2 paneer roll" });
-  assert.deepEqual(parsed[1], { command: "/add", args: "mithai 10" });
+test("the spaced form is unchanged", () => {
+  assert.deepEqual(splitCommands("/add biryani 220"), [{ command: "/add", args: "biryani 220" }]);
 });
 
-test("two commands on separate lines are split", () => {
-  const parsed = splitCommands("/zbill 2 chai\n/plus 1 mithai");
-  assert.equal(parsed.length, 2);
-  assert.equal(parsed[0]!.command, "/zbill");
-  assert.equal(parsed[1]!.command, "/plus");
-  assert.equal(parsed[1]!.args, "1 mithai");
+test("case never matters", () => {
+  for (const t of ["/ADDbiryani 220", "/Add biryani 220", "/aDdBiryani 220"]) {
+    assert.equal(one(t).command, "/add", t);
+  }
 });
 
-test("plain text with no command is returned as-is", () => {
-  assert.deepEqual(splitCommands("2 paneer 3 samosa"), [{ command: "", args: "2 paneer 3 samosa" }]);
+// --- The glue must not eat a longer command -----------------------------
+
+test("the LONGEST matching command wins", () => {
+  assert.equal(one("/additem 2 chai").command, "/additem");
+  assert.equal(one("/removeitem lassi").command, "/removeitem");
+  // ...and the short ones still resolve to themselves.
+  assert.equal(one("/add chai 15").command, "/add");
+  assert.equal(one("/remove chai").command, "/remove");
+});
+
+test("every known command resolves to itself, glued and spaced", () => {
+  for (const cmd of KNOWN_COMMANDS) {
+    assert.equal(one(cmd).command, cmd, `${cmd} bare`);
+    assert.equal(one(`${cmd} x`).command, cmd, `${cmd} spaced`);
+  }
+});
+
+// --- An unknown command is a typo, not an order -------------------------
+//
+// This is the whole reason the bug cost a bill: an unresolved "/word" was
+// handed to the order parser, which will always find SOMETHING to bill.
+
+test("a message starting with an unknown command is not billed", () => {
+  const [cmd] = splitCommands("/addd biryani 220");
+  assert.equal(cmd!.command, "/addd", "an unknown command must surface as a command");
+  assert.notEqual(cmd!.command, "", "it must never fall through to the order parser");
+});
+
+test("a stray slash inside a sentence does not refuse the order", () => {
+  // Punctuation mid-sentence is not a seller reaching for a command, and
+  // refusing a real order over it would be the worse failure.
+  assert.equal(one("ravi 2 paneer /naan 1").command, "");
+  assert.equal(one("ravi 2 paneer /naan 1").args, "ravi 2 paneer /naan 1");
+});
+
+test("a slash followed by a digit is a quantity, never a command", () => {
+  for (const t of ["1/2 kg paneer", "2 chai /3 samosa", "12/09 sales"]) {
+    assert.equal(one(t).command, "", t);
+  }
+});
+
+// --- Everything that already worked, still works ------------------------
+
+test("several commands in one message still split in order", () => {
+  assert.deepEqual(splitCommands("/zbill 2 chai\n/plus 1 mithai"), [
+    { command: "/zbill", args: "2 chai" },
+    { command: "/plus", args: "1 mithai" },
+  ]);
+});
+
+test("text before the first command is still kept", () => {
+  assert.deepEqual(splitCommands("ria bhanushali /zbill 3 mudpie"), [
+    { command: "/zbill", args: "ria bhanushali 3 mudpie" },
+  ]);
+});
+
+test("plain language is still plain language", () => {
+  for (const t of ["ravi 2 paneer 1 chai", "who hasn't paid", "sales", "2 chai 3 samosa"]) {
+    assert.equal(one(t).command, "", t);
+    assert.equal(one(t).args, t);
+  }
 });
 
 test("an empty message yields nothing", () => {
   assert.deepEqual(splitCommands("   "), []);
 });
 
-test("command matching is case-insensitive", () => {
-  assert.equal(splitCommands("/ZBILL 2 chai")[0]!.command, "/zbill");
+// --- A typo is a typo, a glue is a glue ---------------------------------
+//
+// "/addd biryani" and "/addbiryani 220" both fail an exact match, and the
+// difference between them is not a list of spellings — it is distance.
+// "addd" is one slip from "add"; "addbiryani" is seven.
+
+test("a near-miss command is a typo, not a command with a weird argument", () => {
+  for (const [typed, meant] of [["/addd", "/add"], ["/sale", "/sales"], ["/hlep", "/help"]] as [string, string][]) {
+    const cmd = one(`${typed} biryani 220`);
+    assert.notEqual(cmd.command, meant, `${typed} was silently run as ${meant}`);
+    assert.notEqual(cmd.command, "", `${typed} fell through to the order parser`);
+  }
 });
 
-test("a command with no arguments has empty args", () => {
-  assert.deepEqual(splitCommands("/bill"), [{ command: "/bill", args: "" }]);
-});
-
-test("three commands in one message all run", () => {
-  const parsed = splitCommands("/add chai 15 /zbill 2 chai /bill");
-  assert.equal(parsed.length, 3);
-  assert.deepEqual(parsed.map((p) => p.command), ["/add", "/zbill", "/bill"]);
-});
-
-test("a word merely containing a command name is NOT split", () => {
-  // "/zbill" only counts at a whitespace boundary, so item names are safe.
-  const parsed = splitCommands("/zbill 2 addon rolls");
-  assert.equal(parsed.length, 1);
-  assert.equal(parsed[0]!.args, "2 addon rolls");
-});
-
-// --- Text before the command belongs to the command --------------------
-// "ria bhanushali /zbill 3 mudpie" produced a bill with no customer: the
-// prefix was discarded before the order ever reached the parser.
-
-test("a customer name written before the command is kept", () => {
-  const parsed = splitCommands("ria bhanushali /zbill 3 mudpie");
-  assert.equal(parsed.length, 1);
-  assert.equal(parsed[0]!.command, "/zbill");
-  assert.equal(parsed[0]!.args, "ria bhanushali 3 mudpie");
-});
-
-test("the prefix attaches to the FIRST command only", () => {
-  const parsed = splitCommands("ravi /zbill 2 chai /plus 1 lassi");
-  assert.equal(parsed.length, 2);
-  assert.equal(parsed[0]!.args, "ravi 2 chai");
-  assert.equal(parsed[1]!.args, "1 lassi");
-});
-
-test("a command with nothing before it is unchanged", () => {
-  const parsed = splitCommands("/zbill 3 mudpie");
-  assert.equal(parsed[0]!.args, "3 mudpie");
-});
-
-test("a prefix on a command that takes no arguments does no harm", () => {
-  const parsed = splitCommands("thanks /sales");
-  assert.equal(parsed[0]!.command, "/sales");
-  assert.equal(parsed[0]!.args, "thanks");
-});
-
-test("a multi-line prefix is kept", () => {
-  const parsed = splitCommands("ria bhanushali\n/zbill 3 mudpie");
-  assert.equal(parsed[0]!.args, "ria bhanushali 3 mudpie");
+test("a far-off remainder is a real argument", () => {
+  assert.equal(one("/addbiryani 220").command, "/add");
+  assert.equal(one("/pricesnow").command, "/prices");
 });
