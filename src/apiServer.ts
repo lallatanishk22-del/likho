@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage as IncomingMessage2, type ServerResponse } from "node:http";
+import { timingSafeEqual } from "node:crypto";
 import { routeParseOrder } from "./router.js";
 import { joinGroupedNumbers } from "./groupedNumbers.js";
 import { handleIncoming } from "./messageHandler.js";
@@ -11,6 +12,28 @@ import { formatBill } from "./formatter.js";
 // logic lives here, only request/response plumbing.
 const PORT = Number(process.env["PORT"] ?? 3000);
 
+// /api/message acts as whichever seller the body names, so this server is
+// a key to every shop. It listens on this machine only (Docker Desktop
+// still reaches it via host.docker.internal) and every request must carry
+// LIKHO_API_KEY. Without a key configured it refuses to start, rather
+// than run open.
+const HOST = process.env["HOST"] ?? "127.0.0.1";
+const API_KEY = process.env["LIKHO_API_KEY"] ?? "";
+const MAX_BODY_BYTES = 64 * 1024;
+
+if (API_KEY.length < 32) {
+  console.error("LIKHO_API_KEY is missing or shorter than 32 characters. Set it in .env.");
+  process.exit(1);
+}
+
+function hasValidKey(req: IncomingMessage2): boolean {
+  const given = req.headers["x-likho-key"];
+  if (typeof given !== "string") return false;
+  const a = Buffer.from(given);
+  const b = Buffer.from(API_KEY);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
   res.writeHead(status, { "Content-Type": "application/json" });
@@ -19,7 +42,10 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 
 async function readBody(req: IncomingMessage2): Promise<string> {
   const chunks: Buffer[] = [];
+  let size = 0;
   for await (const chunk of req) {
+    size += (chunk as Buffer).length;
+    if (size > MAX_BODY_BYTES) throw new Error("Request body too large.");
     chunks.push(chunk as Buffer);
   }
   return Buffer.concat(chunks).toString("utf-8");
@@ -139,6 +165,10 @@ async function handleMessageRequest(req: IncomingMessage2, res: ServerResponse):
 }
 
 const server = createServer((req, res) => {
+  if (!hasValidKey(req)) {
+    sendJson(res, 401, { ok: false, error: "Missing or wrong x-likho-key header." });
+    return;
+  }
   if (req.url === "/api/message") {
     if (req.method !== "POST") {
       sendJson(res, 405, { ok: false, error: "Method not allowed. Use POST." });
@@ -164,8 +194,8 @@ const server = createServer((req, res) => {
   });
 });
 
-server.listen(PORT, () => {
-  console.log(`Likho API listening on http://localhost:${PORT}`);
+server.listen(PORT, HOST, () => {
+  console.log(`Likho API listening on http://${HOST}:${PORT} (x-likho-key required)`);
   console.log("  POST /api/message  {text, platformUserId}  -> full product (all commands)");
   console.log("  POST /api/order    {text}                  -> parse+bill only");
 });

@@ -1,5 +1,5 @@
 import { handleIncoming, handleAction, type Reply, type IncomingMessage } from "./messageHandler.js";
-import { promises as fs } from "node:fs";
+import { promises as fs, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 // Telegram transport only: receive updates, hand them to the shared
@@ -232,8 +232,29 @@ async function handleMessage(message: TelegramMessage, text: string): Promise<Re
   return handleIncoming(toIncoming(message, text));
 }
 
+// Where in Telegram's queue the bot is, kept on disk. In memory alone, a
+// restart forgot it and Telegram redelivered messages already handled.
+const OFFSET_FILE = new URL("../../logs/telegram.offset", import.meta.url);
+
+function loadOffset(): number {
+  try {
+    const n = Number(readFileSync(OFFSET_FILE, "utf-8").trim());
+    return Number.isInteger(n) && n > 0 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function saveOffset(offset: number): void {
+  try {
+    writeFileSync(OFFSET_FILE, String(offset));
+  } catch (err) {
+    console.error("[telegram] could not save offset:", err);
+  }
+}
+
 async function pollLoop(): Promise<void> {
-  let offset = 0;
+  let offset = loadOffset();
   console.log("Likho Telegram bot running. Send /help to the bot to begin.");
 
   for (;;) {
@@ -308,7 +329,55 @@ async function pollLoop(): Promise<void> {
         // Advance only after the attempt completes, so a crash mid-process
         // cannot silently consume a message without answering it.
         offset = update.update_id + 1;
+        saveOffset(offset);
       }
+    }
+  }
+}
+
+// What a first-time visitor sees before typing anything: the "/" menu, the
+// text in the empty chat, and the profile line. Set on every start so the
+// code is the single source of truth. A failure here never stops the bot.
+async function setBotProfile(): Promise<void> {
+  const calls: [string, unknown][] = [
+    [
+      "setMyCommands",
+      {
+        commands: [
+          { command: "start", description: "Get set up in under a minute" },
+          { command: "zbill", description: "Make a bill: /zbill Rahul 2 samosa 1 chai" },
+          { command: "add", description: "Save prices: /add paneer 220" },
+          { command: "prices", description: "See your price list" },
+          { command: "sales", description: "Today's sales" },
+          { command: "open", description: "Bills not confirmed yet" },
+          { command: "help", description: "Everything I can do" },
+        ],
+      },
+    ],
+    [
+      "setMyDescription",
+      {
+        description:
+          "Likho turns a typed order into a correct bill.\n\n" +
+          "Type it the way you'd write it — \"Rahul 2 samosa 1 chai\", Hinglish is fine — " +
+          "and Likho prices it from your list, adds it up, and keeps the record: " +
+          "who bought what, who has paid, today's sales.\n\n" +
+          "Tap Start, then \"Try a sample menu\" to see a bill in seconds.",
+      },
+    ],
+    ["setMyShortDescription", { short_description: "Type an order, get a correct bill. Built for small Indian sellers." }],
+  ];
+  for (const [method, body] of calls) {
+    try {
+      const res = await fetch(`${API_BASE}/${method}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = (await res.json()) as { ok: boolean; description?: string };
+      if (!data.ok) console.error(`[telegram] ${method} failed: ${data.description}`);
+    } catch (err) {
+      console.error(`[telegram] ${method} failed:`, err);
     }
   }
 }
@@ -319,6 +388,7 @@ async function main() {
     console.error('  export TELEGRAM_BOT_TOKEN="123456:ABC-your-bot-token"');
     process.exit(1);
   }
+  await setBotProfile();
   await pollLoop();
 }
 

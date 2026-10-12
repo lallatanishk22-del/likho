@@ -1,3 +1,4 @@
+import { joinGroupedNumbers } from "./groupedNumbers.js";
 // The conversation layer: decides WHAT the seller is asking for, before
 // anything tries to extract an order from it.
 //
@@ -98,6 +99,10 @@ export interface Intent {
   billNo: number | null;
   // Rupee amount stated with a payment intent ("Ravi paid 500").
   amount: number | null;
+  // Payment only: every number in the message, in order, and whether it was
+  // marked as money (₹, rs, rupees). An unmarked number might be a bill
+  // number typed without "#" — only the price store can say which.
+  numbers?: { value: number; money: boolean }[];
   // Customer the seller named ("open ravi bill", "ravi paid 500"). Null
   // means they didn't name one, i.e. "the bill I'm working on". Never
   // treat these two as the same: a named customer with no bill is an
@@ -345,11 +350,23 @@ function classifyIntentInner(rawText: string): Intent {
   // Checked BEFORE order, because "Ravi paid 500" contains a name and a
   // number and would otherwise look exactly like an order.
   if (hasWord(lower, "paid", "payment", "settled", "received", "diya", "de", "diye")) {
-    const amountMatch = text.match(/(?:rs\.?|₹)?\s*(\d+(?:\.\d{1,2})?)/);
-    // Don't read the bill number itself as the amount paid.
-    const candidate = amountMatch ? Number(amountMatch[1]) : null;
-    const amount = candidate !== null && candidate !== billNo ? candidate : null;
-    return { ...base, name: "payment", amount, customer: extractCustomer(text) };
+    // The amount is the first number that is NOT the bill number. Taking
+    // only the first number read "#1001 paid 50" as 1001, discarded it as
+    // the bill number, and recorded a ₹50 part-payment as paid in full.
+    // A date or time is not money: "paid on 12/10", "paid 12 oct", "at 5pm".
+    const NOT_MONEY =
+      /^(?:\s*[/:\-.]\d|\s*(?:am|pm|baje|o'?clock|days?|din|hrs?|hours?|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b)/i;
+    const joined = joinGroupedNumbers(text);
+    const numbers = [...joined.matchAll(/([#/:-])?(\d+(?:\.\d{1,2})?)/g)]
+      .filter((m) => m[1] === undefined && !NOT_MONEY.test(joined.slice(m.index! + m[0].length)))
+      .map((m) => ({
+        value: Number(m[2]),
+        money:
+          /(?:₹|\brs\.?|\brupees?)\s*$/i.test(joined.slice(0, m.index!)) ||
+          /^\s*(?:rs\b|rupees?\b|\/-)/i.test(joined.slice(m.index! + m[0].length)),
+      }));
+    const amount = numbers.find((n) => n.value !== billNo)?.value ?? null;
+    return { ...base, name: "payment", amount, numbers, customer: extractCustomer(text) };
   }
 
   if (/^(mock|preview|sample)\b/i.test(lower)) {

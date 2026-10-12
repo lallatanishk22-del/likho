@@ -28,5 +28,9 @@ Import: n8n → Workflows → Import from File.
 Needs `npm run api` reachable at `host.docker.internal:3000`, which launchd
 keeps running (`com.likho.api`).
 
+The API listens on 127.0.0.1 only and rejects any request without the
+`x-likho-key` header. After importing, replace `PASTE_LIKHO_API_KEY_FROM_.env`
+in the HTTP node with the `LIKHO_API_KEY` value from `.env`.
+
 The summary text comes from the SAME handler that answers "sales" in chat,
 so the nightly number can never disagree with what the bot says when asked.

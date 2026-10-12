@@ -197,6 +197,13 @@ function skipAction(label: string): { label: string; action: string } {
   return { label, action: SKIP_ACTION };
 }
 
+// One tap to a real bill, for anyone trying Likho before they have typed a
+// price list. Always called a SAMPLE: these are not the seller's prices.
+export const SAMPLE_ACTION = "onb:sample";
+export const SAMPLE_MENU =
+  "paneer tikka 180\nbutter naan 40\ndal fry 90\nthali 150\nsamosa 20\nchai 15\nlassi 40\ncoke 40";
+const sampleAction = { label: "\u{26a1} Try a sample menu", action: SAMPLE_ACTION };
+
 export function welcomeQuestion(retry: boolean): Question {
   const list = BUSINESS_KINDS.map((k, i) => `  ${i + 1}. ${k.label}`).join("\n");
   const opening = retry
@@ -208,6 +215,7 @@ export function welcomeQuestion(retry: boolean): Question {
     text: `${opening}\n\n${list}\n\nOr say *skip* and start billing right away.`,
     actions: [
       ...BUSINESS_KINDS.map((k) => ({ label: k.label, action: encodeKind(k.id) })),
+      sampleAction,
       skipAction("Skip setup"),
     ],
   };
@@ -247,7 +255,7 @@ export function pricesQuestion(kind: BusinessKind, shopName: string | null): Que
       kind.examples.map((e) => `  ${e}`).join("\n") +
       `\n\nI'll remember these and price every future order from them. ` +
       `You can add or change items any time.`,
-    actions: [skipAction("Skip — I'll add them later")],
+    actions: [sampleAction, skipAction("Skip — I'll add them later")],
   };
 }
 

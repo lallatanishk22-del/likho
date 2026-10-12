@@ -96,6 +96,21 @@ async function allocateBillNo(businessId: string): Promise<number> {
   return result;
 }
 
+export async function findBillBySourceMessage(
+  businessId: string,
+  sourceMessageId: string,
+): Promise<StoredBill | null> {
+  const sessions = (await rest(
+    `bill_sessions?business_id=eq.${businessId}` +
+      `&source_message_id=eq.${encodeURIComponent(sourceMessageId)}&limit=1&select=*`,
+  )) as BillSessionRow[];
+  if (sessions.length === 0) return null;
+  const items = (await rest(
+    `bill_items?bill_session_id=eq.${sessions[0]!.id}&order=position.asc&select=*`,
+  )) as BillItemRow[];
+  return { session: sessions[0]!, items };
+}
+
 export async function createBillSession(
   businessId: string,
   parsed: ParsedOrder,
@@ -308,6 +323,7 @@ export async function recalculateBill(
       charges: bill.charges,
       charges_total: bill.chargesTotal,
       total: bill.total,
+      payment_status: paymentStatusFor(Number(session.amount_paid), bill.total),
       version: nextVersion,
       status: "updated",
       updated_at: new Date().toISOString(),
@@ -468,6 +484,14 @@ export async function setBillCustomer(
   return recalculateBill(sessionId, "manual_edit");
 }
 
+// The ONE place payment status comes from. Derived from money received vs
+// the bill's current total — so a paid bill that later grows becomes
+// "partial" instead of hiding what is still owed.
+export function paymentStatusFor(amountPaid: number, total: number): BillSessionRow["payment_status"] {
+  if (amountPaid <= 0) return "pending";
+  return amountPaid >= total ? "paid" : "partial";
+}
+
 // Records a payment against a bill. The status is DERIVED from the amounts
 // (deterministic, like every other money decision here) rather than taken
 // from whatever the seller's sentence implied.
@@ -484,9 +508,8 @@ export async function recordPayment(
   const total = Number(session.total);
   // A payment with no stated amount means "paid in full".
   const paidNow = amount === null ? total : Number(session.amount_paid) + amount;
-  const clamped = Math.min(Math.round(paidNow * 100) / 100, total);
-  const status: BillSessionRow["payment_status"] =
-    clamped >= total ? "paid" : clamped > 0 ? "partial" : "pending";
+  const clamped = Math.max(0, Math.min(Math.round(paidNow * 100) / 100, total));
+  const status = paymentStatusFor(clamped, total);
 
   const updated = (await rest(`bill_sessions?id=eq.${sessionId}`, {
     method: "PATCH",

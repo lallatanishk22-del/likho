@@ -25,10 +25,12 @@ import {
   getOpenBills,
   getSales,
   setBillDiscount,
+  findBillBySourceMessage,
   type StoredBill,
 } from "./billStore.js";
 import { buildCatalogIndex, findProduct, findProductByContainment, CatalogResolutionError } from "./catalog.js";
-import { classifyIntent } from "./intent.js";
+import { classifyIntent, type Intent } from "./intent.js";
+import { decidePayment, firstBareNumber, type PaymentDecision } from "./paymentNumbers.js";
 import { parseDiscount } from "./discount.js";
 import { parseOrderExtras } from "./orderExtras.js";
 import { expandHindiNumerals, hasNumeralWord } from "./hindiNumerals.js";
@@ -76,7 +78,7 @@ import {
   kindById, decodeKind, readBusinessKind, readShopName, looksLikeAnOrder,
   isSkip, welcomeQuestion, nameQuestion, pricesQuestion, pricesRetry, finishedMessage,
   orderBeforePricesQuestion,
-  skippedMessage, SKIP_ACTION, FORMAT_ACTION, SHOP_ACTION, type BusinessKind,
+  skippedMessage, SKIP_ACTION, FORMAT_ACTION, SHOP_ACTION, SAMPLE_ACTION, SAMPLE_MENU, type BusinessKind,
 } from "./onboarding.js";
 import {
   CustomerAmbiguousError, findCustomer, findCustomerInMessage,
@@ -501,6 +503,31 @@ async function handleRestartSetup(businessId: string): Promise<Reply> {
   return welcomeQuestion(false);
 }
 
+// Loads the sample menu and finishes setup, so the next message can be an
+// order. Only into an EMPTY price list: mixed into a real one, sample
+// prices would end up on real bills.
+async function handleSampleMenu(businessId: string): Promise<Reply> {
+  if ((await loadCatalog(businessId)).products.length > 0) {
+    return {
+      text:
+        "You already have a price list, so I left it as it is.\n\n" +
+        "The sample menu is only for trying me before you add your own prices. " +
+        "Send an order, or see your list with:  /prices",
+    };
+  }
+  await handleAdd(businessId, SAMPLE_MENU);
+  await setOnboardingStep(businessId, "done");
+  const list = SAMPLE_MENU.split("\n")
+    .map((l) => `  ${titleCase(l.replace(/\s+\d+$/, ""))} — ${formatRupees(Number(l.match(/\d+$/)![0]))}`)
+    .join("\n");
+  return {
+    text:
+      `Loaded a sample menu so you can try me:\n\n${list}\n\n` +
+      `These are sample prices. Change any one like:  chai 20\n\n` +
+      `Now send an order, just as you'd type it:\n  Rahul 2 samosa 1 chai`,
+  };
+}
+
 async function handleSkipSetup(businessId: string): Promise<Reply> {
   const state = await loadOnboarding(businessId);
   await setOnboardingStep(businessId, "done");
@@ -851,6 +878,15 @@ async function handleOrder(
   sourceMessageId: string | null,
   onSlowWork?: () => Promise<void>,
 ): Promise<Reply> {
+  // ONE MESSAGE, ONE BILL. Telegram redelivers a message the bot did not
+  // acknowledge; billing it again would double a transaction.
+  if (sourceMessageId) {
+    const existing = await findBillBySourceMessage(businessId, sourceMessageId);
+    if (existing) {
+      return billReply(existing, `Already billed this message as #${existing.session.bill_no}.`);
+    }
+  }
+
   await onSlowWork?.();
   text = joinGroupedNumbers(text);
   const catalog = await loadCatalog(businessId);
@@ -1215,6 +1251,16 @@ async function handleConfirm(
   };
 }
 
+async function resolvePaymentNumbers(businessId: string, intent: Intent): Promise<PaymentDecision> {
+  const numbers = intent.numbers ?? [];
+  const bare = firstBareNumber(numbers);
+  const firstBareIsBill =
+    intent.billNo === null && !intent.customer && bare !== null && Number.isInteger(bare)
+      ? (await getBillByNo(businessId, bare)) !== null
+      : false;
+  return decidePayment(intent.billNo, intent.amount, intent.customer, numbers, firstBareIsBill);
+}
+
 // Payment is recorded only from the SELLER's explicit statement. A customer
 // saying "paid" never reaches this — that is a claim, not a receipt.
 async function handlePayment(
@@ -1233,16 +1279,24 @@ async function handlePayment(
     };
   }
 
+  // Money beyond the bill is change or an advance — not this bill's
+  // revenue. It is not recorded, but it is never dropped without a word.
+  const overpaid =
+    amount === null
+      ? 0
+      : Math.round((Number(bill.session.amount_paid) + amount - Number(bill.session.total)) * 100) / 100;
+
   const updated = await recordPayment(bill.session.id, amount);
   if (!updated) return { text: "Couldn't find that bill." };
 
+  const extra = overpaid > 0 ? `\n${formatRupees(overpaid)} more than the bill — not recorded.` : "";
   const note =
     updated.session.payment_status === "paid"
       ? `Marked #${updated.session.bill_no} paid in full.`
       : `Recorded ${formatRupees(Number(updated.session.amount_paid))} against #${updated.session.bill_no}. ` +
         `${formatRupees(Number(updated.session.total) - Number(updated.session.amount_paid))} still due.`;
 
-  return billReply(updated, note);
+  return billReply(updated, note + extra);
 }
 
 async function handleDone(businessId: string): Promise<Reply> {
@@ -1448,8 +1502,11 @@ export async function handleIncoming(incoming: IncomingMessage): Promise<Reply> 
   // Explicit commands still win — a seller who typed one meant it.
   if (isCommand) {
     const replies: Reply[] = [];
-    for (const c of commands) {
-      replies.push(await runCommand(businessId, incoming, c.command, c.args, trimmed, sourceMessageId));
+    // Each command in one message gets its own id, so "/zbill 2 chai
+    // /zbill 3 samosa" is two bills — and a redelivery maps to the same ids.
+    for (const [i, c] of commands.entries()) {
+      const commandMessageId = sourceMessageId && i > 0 ? `${sourceMessageId}:${i}` : sourceMessageId;
+      replies.push(await runCommand(businessId, incoming, c.command, c.args, trimmed, commandMessageId));
     }
     if (replies.length === 1) return remember(businessId, replies[0]!);
     const last = replies[replies.length - 1]!;
@@ -1553,8 +1610,11 @@ async function runIntent(
       }
       case "confirm":
         return await handleConfirm(businessId, intent.billNo, intent.customer);
-      case "payment":
-        return await handlePayment(businessId, intent.billNo, intent.amount, intent.customer);
+      case "payment": {
+        const resolved = await resolvePaymentNumbers(businessId, intent);
+        if ("ask" in resolved) return { text: resolved.ask };
+        return await handlePayment(businessId, resolved.billNo, resolved.amount, intent.customer);
+      }
       case "pdf":
         return await handleBillPdf(businessId, intent.billNo);
       case "customer_statement": {
@@ -1717,6 +1777,14 @@ export async function handleAction(incoming: IncomingMessage, action: string): P
   if (kind) {
     try {
       return await applyKind(businessId, kind);
+    } catch (err) {
+      return { text: `Something went wrong: ${(err as Error).message}` };
+    }
+  }
+
+  if (action === SAMPLE_ACTION) {
+    try {
+      return await handleSampleMenu(businessId);
     } catch (err) {
       return { text: `Something went wrong: ${(err as Error).message}` };
     }
@@ -1887,7 +1955,20 @@ async function runCommand(
   const { onSlowWork } = incoming;
   try {
     switch (command) {
-      case "/start":
+      case "/start": {
+        // Telegram's Start button is the first thing every new user sends.
+        // Mid-setup it opens the welcome, not the full help text.
+        // Later steps re-ask their question: handing them "/start" as the
+        // answer would save it as the shop name or as a product.
+        const onboarding = await loadOnboarding(businessId);
+        const kind = kindById(onboarding.kindId);
+        if (onboarding.step === "kind") {
+          return await handleOnboarding(businessId, onboarding, incoming, "/start", sourceMessageId);
+        }
+        if (onboarding.step === "name") return nameQuestion(kind, "empty");
+        if (onboarding.step === "prices") return pricesQuestion(kind, null);
+        return { text: HELP };
+      }
       case "/help":
         return { text: HELP };
       case "/setup":
@@ -1944,8 +2025,14 @@ async function runCommand(
         return await handleRemoveItem(businessId, args);
       case "/done":
         return await handleDone(businessId);
-      case "/paid":
-        return await handlePayment(businessId, null, null);
+      case "/paid": {
+        // "/paid 1003 100" carries the bill and amount — reading it as a
+        // bare "/paid" marked the newest bill paid in full.
+        const intent = classifyIntent(`paid ${args}`);
+        const resolved = await resolvePaymentNumbers(businessId, intent);
+        if ("ask" in resolved) return { text: resolved.ask };
+        return await handlePayment(businessId, resolved.billNo, resolved.amount, intent.customer);
+      }
       case "/sales":
         return await handleSales(businessId, args.length > 0 ? args : trimmed);
       case "/open":
