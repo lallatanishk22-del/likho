@@ -14,6 +14,7 @@
 //
 // Needs the live model and the price store, so it cannot run in npm test.
 import { handleIncoming } from "../src/messageHandler.js";
+import { billHasItem } from "./billReading.js";
 
 const business = {
   platform: "telegram" as const,
@@ -93,7 +94,7 @@ async function run(): Promise<void> {
     const lines = reply.text.split("\n");
     const missing: string[] = [];
     for (const [name, quantity] of Object.entries(c.expect)) {
-      if (!lines.some((l) => l.trim().startsWith(`${name} × ${quantity}`))) {
+      if (!billHasItem(reply.text, name, quantity)) {
         missing.push(`${name} × ${quantity}`);
       }
     }

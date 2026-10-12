@@ -109,6 +109,10 @@ export async function upsertProduct(
       business_id: businessId,
       name: name.toLowerCase().trim(),
       price,
+      // A removed item is only switched off, so re-adding it lands on the
+      // old row. Without this the price was saved but the item stayed off,
+      // and orders still could not find it.
+      active: true,
       updated_at: new Date().toISOString(),
     }),
   });
@@ -135,11 +139,19 @@ export async function renameProduct(
   const newName = to.toLowerCase().trim();
   if (oldName === newName) return "renamed";
 
-  const existing = (await rest(
-    `products?business_id=eq.${businessId}&name=eq.${encodeURIComponent(newName)}` +
-      `&active=eq.true&select=id`,
-  )) as { id: string }[];
-  if (existing.length > 0) return "target_exists";
+  // Names are unique per business INCLUDING removed items, which stay in
+  // the table switched off. Only an active one is a real clash; a removed
+  // one is moved aside under a tagged name so the rename can take it.
+  const taken = (await rest(
+    `products?business_id=eq.${businessId}&name=eq.${encodeURIComponent(newName)}&select=id,active`,
+  )) as { id: string; active: boolean }[];
+  if (taken.some((p) => p.active)) return "target_exists";
+  for (const removed of taken) {
+    await rest(`products?id=eq.${removed.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name: `${newName} (removed ${removed.id.slice(0, 8)})` }),
+    });
+  }
 
   const updated = (await rest(
     `products?business_id=eq.${businessId}&name=eq.${encodeURIComponent(oldName)}&active=eq.true`,
@@ -213,6 +225,9 @@ export async function takePendingResolution(
 export const CLARIFY_PREFIX = "__clarify__:";
 // The question "what does this new item cost?" — its message is the name.
 export const PRICE_QUESTION = "price-for-new-item";
+// A bare command ("/zbill" tapped from the menu) waiting for its
+// arguments — its message is the command.
+export const AWAIT_COMMAND = "await-command";
 const CLARIFY_TTL_MS = 15 * 60 * 1000;
 
 export async function setPendingClarification(

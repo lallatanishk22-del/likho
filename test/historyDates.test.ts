@@ -53,9 +53,9 @@ test("'yesterday' and 'kal' both mean yesterday", () => {
 
 test("'last week' resolves, not just 'this week'", () => {
   // Previously only "this week" was recognised.
-  assert.equal(parseDateRange("tanishk bills last week", NOW, IST)?.label, "Last 7 days");
+  assert.equal(parseDateRange("tanishk bills last week", NOW, IST)?.label, "Last week");
   assert.equal(parseDateRange("tanishk bills past week", NOW, IST)?.label, "Last 7 days");
-  assert.equal(parseDateRange("tanishk bills this week", NOW, IST)?.label, "Last 7 days");
+  assert.equal(parseDateRange("tanishk bills this week", NOW, IST)?.label, "This week");
 });
 
 test("'this month' and 'last month' resolve", () => {

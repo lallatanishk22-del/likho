@@ -14,6 +14,7 @@
 // Like eval/nameExtraction.ts this needs the live model and the price
 // store, so it cannot run in `npm test`. Run it after any prompt change.
 import { handleIncoming } from "../src/messageHandler.js";
+import { billHasItem } from "./billReading.js";
 
 const business = {
   platform: "telegram" as const,
@@ -61,7 +62,7 @@ async function run(): Promise<void> {
     const lines = reply.text.split("\n");
     const missing: string[] = [];
     for (const [name, quantity] of Object.entries(testCase.expect)) {
-      const found = lines.some((l) => l.startsWith(`${name} × ${quantity}`));
+      const found = billHasItem(reply.text, name, quantity);
       if (!found) missing.push(`${name} × ${quantity}`);
     }
 

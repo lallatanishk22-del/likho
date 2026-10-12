@@ -10,6 +10,7 @@
 // The negative cases matter most: a bill that invents a customer is worse
 // than one with no name on it.
 import { handleIncoming } from "../src/messageHandler.js";
+import { billCustomer } from "./billReading.js";
 
 const business = {
   platform: "telegram" as const,
@@ -55,8 +56,7 @@ async function run(): Promise<void> {
 
   for (const testCase of CASES) {
     const reply = await handleIncoming({ ...business, text: testCase.message });
-    const match = reply.text.match(/\u{1f9fe} (.+?) — Bill/u);
-    const found = match ? match[1]! : null;
+    const found = billCustomer(reply.text);
 
     const ok =
       testCase.expect === null

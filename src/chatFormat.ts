@@ -27,54 +27,102 @@ export function titleCase(name: string): string {
   return name.replace(/\b[a-z]/g, (c) => c.toUpperCase());
 }
 
-// The bill as an ARTIFACT, not a paragraph: aligned columns, a real
-// transaction number, and an explicit payment state. Rendered from STORED
-// state so the seller always sees exactly what is persisted.
+// The bill as a RECEIPT: what a printed shop slip looks like, in a
+// monospace block. Item / Qty / Amount in real columns, the total between
+// double rules, payment on its own line. Rendered from STORED state so the
+// seller always sees exactly what is persisted.
+//
+// 30 characters wide: Telegram starts scrolling a <pre> block sideways at
+// roughly 30–34 on a phone. Columns size themselves to the widest amount
+// and quantity, so a ₹1,00,00,000 line or a quantity of 1,00,000 shrinks
+// the name column instead of breaking the layout.
+export const RECEIPT_WIDTH = 30;
+
+export interface ReceiptInput {
+  billNo: number;
+  customer: string | null;
+  stamp: string;
+  items: { name: string; qty: number; amount: string }[];
+  summary: { left: string; right: string }[];
+  total: string;
+  payment: string;
+}
+
+export function layoutReceipt(r: ReceiptInput): string[] {
+  const W = RECEIPT_WIDTH;
+  // Centred when it fits; a longer line is left as is rather than cut,
+  // because it may carry money.
+  const center = (s: string) => (s.length >= W ? s : " ".repeat(Math.floor((W - s.length) / 2)) + s);
+  const clip = (s: string, room: number) => (s.length > room ? `${s.slice(0, Math.max(1, room - 1))}…` : s);
+  const lr = (left: string, right: string) => {
+    const room = W - right.length - 1;
+    return clip(left, room).padEnd(W - right.length) + right;
+  };
+
+  const amountW = Math.max("Amount".length, ...r.items.map((i) => i.amount.length));
+  const qtyW = Math.max("Qty".length, ...r.items.map((i) => String(i.qty).length));
+  const nameW = W - amountW - qtyW - 2;
+  const cols = (name: string, qty: string, amount: string) =>
+    clip(name, nameW).padEnd(nameW) + " " + qty.padStart(qtyW) + " " + amount.padStart(amountW);
+
+  const heading = r.customer ? `Bill #${r.billNo} · ${r.customer}` : `Bill #${r.billNo}`;
+  return [
+    center(heading),
+    center(r.stamp),
+    "-".repeat(W),
+    cols("Item", "Qty", "Amount"),
+    ...r.items.map((i) => cols(i.name, String(i.qty), i.amount)),
+    ...(r.summary.length > 0 ? ["-".repeat(W), ...r.summary.map((s) => lr(s.left, s.right))] : []),
+    "=".repeat(W),
+    lr("TOTAL", r.total),
+    "=".repeat(W),
+    center(r.payment),
+  ];
+}
+
 export function renderStoredBill(stored: StoredBill): string {
   const { session, items } = stored;
-
-  const rows = items.map((item) => ({
-    left: `${titleCase(item.name_snapshot)} \u00d7 ${item.quantity}`,
-    right: formatRupees(Number(item.line_total)),
-  }));
 
   const summary: { left: string; right: string }[] = [];
   if (Number(session.discount_percent) > 0) {
     summary.push({ left: "Subtotal", right: formatRupees(Number(session.subtotal)) });
     summary.push({
-      left: `Discount (${Number(session.discount_percent)}%)`,
-      right: `\u2212${formatRupees(Number(session.discount_amount))}`,
+      left: `Discount ${Number(session.discount_percent)}%`,
+      right: `−${formatRupees(Number(session.discount_amount))}`,
     });
   }
   for (const charge of Array.isArray(session.charges) ? session.charges : []) {
     summary.push({ left: charge.label, right: formatRupees(Number(charge.amount)) });
   }
-  summary.push({ left: "TOTAL", right: formatRupees(Number(session.total)) });
 
-  // Money is RIGHT-aligned: the amounts must end in one column so they can
-  // be compared by eye. Left-padding the label only made them all START at
-  // the same place, which lines up nothing — Rs 45 and Rs 560 still ended
-  // four characters apart.
-  const all = [...rows, ...summary];
-  const labelW = Math.max(...all.map((r) => r.left.length));
-  const amountW = Math.max(...all.map((r) => r.right.length));
-  const width = labelW + 3 + amountW;
-  const line = (r: { left: string; right: string }) =>
-    r.left.padEnd(labelW + 3) + r.right.padStart(amountW);
-
-  const who = session.customer_ref ? `${titleCase(session.customer_ref)} \u2014 ` : "";
-  const method = session.payment_method ? ` \u00b7 ${session.payment_method}` : "";
-  const paid =
+  const total = Number(session.total);
+  const paidSoFar = Number(session.amount_paid);
+  const method = session.payment_method ? ` · ${session.payment_method}` : "";
+  const payment =
     session.payment_status === "paid"
-      ? "Paid"
+      ? `Paid in full${method}`
       : session.payment_status === "partial"
-        ? `Partly paid \u2014 ${formatRupees(Number(session.amount_paid))} of ${formatRupees(Number(session.total))}`
-        : "Pending";
+        ? `Paid ${formatRupees(paidSoFar)} · Due ${formatRupees(Math.round((total - paidSoFar) * 100) / 100)}${method}`
+        : `Payment pending${method}`;
 
   // Every bill carries its own date and time, in the business's timezone.
   // A bill without one is a message, not a record — and once several exist
   // in a chat, "which day was this?" has no answer without it.
   const stamp = formatBusinessDateTime(new Date(session.finalized_at ?? session.created_at));
+
+  const lines = layoutReceipt({
+    billNo: session.bill_no,
+    customer: session.customer_ref ? titleCase(session.customer_ref) : null,
+    stamp,
+    items: items.map((item) => ({
+      name: titleCase(item.name_snapshot),
+      qty: item.quantity,
+      amount: formatRupees(Number(item.line_total)),
+    })),
+    summary,
+    total: formatRupees(total),
+    payment,
+  });
 
   // INSTRUCTIONS GET THEIR OWN SPACE ON THE DOCUMENT.
   //
@@ -83,30 +131,19 @@ export function renderStoredBill(stored: StoredBill): string {
   // exact work Likho exists to remove. Grouped by heading, below the
   // total, so the money table above is never disturbed by prose.
   const notes = Array.isArray(session.notes) ? session.notes : [];
-  const noteBlock: string[] = [];
   if (notes.length > 0) {
     const byCategory = new Map<string, string[]>();
     for (const n of notes) {
       const label = CATEGORY_LABEL[n.category] ?? CATEGORY_LABEL.note;
       byCategory.set(label, [...(byCategory.get(label) ?? []), n.text]);
     }
-    noteBlock.push("", "\u2500".repeat(width), "NOTES");
+    lines.push("", "-".repeat(RECEIPT_WIDTH), "NOTES");
     for (const [label, texts] of byCategory) {
-      noteBlock.push(`${label}: ${texts.join("; ")}`);
+      lines.push(`${label}: ${texts.join("; ")}`);
     }
   }
 
-  return [
-    `\u{1f9fe} ${who}Bill #${session.bill_no}`,
-    stamp,
-    "",
-    ...rows.map(line),
-    "\u2500".repeat(width),
-    ...summary.map(line),
-    "",
-    `Payment: ${paid}${method}`,
-    ...noteBlock,
-  ].join("\n");
+  return lines.join("\n");
 }
 
 // Every reply that shows a bill goes through here.

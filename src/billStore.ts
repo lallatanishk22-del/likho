@@ -202,58 +202,6 @@ export async function finalizeBill(sessionId: string): Promise<void> {
   });
 }
 
-// Today's finalized bills — the end-of-day view. Deliberately counts only
-// finalized bills: a draft is not a sale.
-export interface DaySummary {
-  count: number;
-  total: number;
-  paidTotal: number;
-  unpaidTotal: number;
-  // Bills started today that were never confirmed. Previously invisible:
-  // a seller could work all day, leave most bills unconfirmed, and see a
-  // daily total far below what they had actually done — with no way to
-  // find the missing ones.
-  openCount: number;
-  openTotal: number;
-}
-
-// Sales for any period. Defaults to today when no range is given, so the
-// bare "sales" question is unchanged.
-export async function getSales(
-  businessId: string,
-  range?: DateRange,
-): Promise<DaySummary> {
-  const from = (range?.from ?? startOfBusinessDay()).toISOString();
-  const toClause = range ? `&finalized_at=lt.${range.to.toISOString()}` : "";
-  const openToClause = range ? `&created_at=lt.${range.to.toISOString()}` : "";
-
-  const confirmed = (await rest(
-    `bill_sessions?business_id=eq.${businessId}&status=eq.finalized` +
-      `&finalized_at=gte.${from}${toClause}&select=total,amount_paid,payment_status`,
-  )) as { total: string | number; amount_paid: string | number }[];
-
-  const open = (await rest(
-    `bill_sessions?business_id=eq.${businessId}&status=in.(draft,updated)` +
-      `&created_at=gte.${from}${openToClause}&select=total`,
-  )) as { total: string | number }[];
-
-  const total = confirmed.reduce((sum, r) => sum + Number(r.total), 0);
-  const paidTotal = confirmed.reduce((sum, r) => sum + Number(r.amount_paid), 0);
-
-  return {
-    count: confirmed.length,
-    total: Math.round(total * 100) / 100,
-    paidTotal: Math.round(paidTotal * 100) / 100,
-    unpaidTotal: Math.round((total - paidTotal) * 100) / 100,
-    openCount: open.length,
-    openTotal: Math.round(open.reduce((sum, r) => sum + Number(r.total), 0) * 100) / 100,
-  };
-}
-
-export async function getTodaysSales(businessId: string): Promise<DaySummary> {
-  return getSales(businessId);
-}
-
 // Bills started today and never confirmed, newest first — so "show open
 // bills" can list exactly what is unaccounted for.
 export async function getOpenBills(businessId: string): Promise<BillSessionRow[]> {

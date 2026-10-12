@@ -1,5 +1,6 @@
 import { handleIncoming, handleAction, type Reply, type IncomingMessage } from "./messageHandler.js";
 import { promises as fs, readFileSync, writeFileSync } from "node:fs";
+import { isRegistered, registerContact, registrationPrompt } from "./registration.js";
 import path from "node:path";
 
 // Telegram transport only: receive updates, hand them to the shared
@@ -12,6 +13,8 @@ const LONG_POLL_TIMEOUT_SECONDS = 30;
 
 interface TelegramChat {
   id: number;
+  // "private" for a one-to-one chat; "group", "supergroup" or "channel" otherwise.
+  type?: string;
   first_name?: string;
   username?: string;
 }
@@ -29,6 +32,9 @@ interface TelegramMessage {
   forward_from?: unknown;
   forward_sender_name?: string;
   forward_date?: number;
+  from?: { id: number };
+  // Sent by the "Share my phone number" button.
+  contact?: { phone_number: string; user_id?: number };
 }
 
 interface TelegramCallbackQuery {
@@ -154,7 +160,13 @@ async function sendReply(chatId: number, reply: Reply): Promise<void> {
       // <pre> to land in a fixed-width font; ordinary replies stay
       // proportional, which reads better for prose.
       ...(reply.parseMode ? { parse_mode: reply.parseMode } : {}),
-      reply_markup: toInlineKeyboard(reply),
+      reply_markup: reply.requestContact
+        ? { keyboard: [[{ text: reply.requestContact, request_contact: true }]], resize_keyboard: true, one_time_keyboard: true }
+        : reply.removeKeyboard
+          ? { remove_keyboard: true }
+          : reply.inputPlaceholder && !reply.actions?.length
+            ? { force_reply: true, input_field_placeholder: reply.inputPlaceholder.slice(0, 64) }
+            : toInlineKeyboard(reply),
     }),
   });
   if (!response.ok) {
@@ -297,6 +309,38 @@ async function pollLoop(): Promise<void> {
       // exception here escaped pollLoop entirely and the bot died silently.
       try {
         const callback = update.callback_query;
+        const chat = message?.chat ?? callback?.message?.chat;
+
+        // PRIVATE CHATS ONLY. In a group every member would share one shop:
+        // anyone could make bills, mark them paid and read the sales.
+        if (chat && chat.type && chat.type !== "private") {
+          if (callback) await answerCallback(callback.id);
+          else if (message) await sendMessage(chat.id, "Please use me in a private chat — open @zbillingbot and tap Start.");
+          continue;
+        }
+
+        // REGISTRATION. A shared contact registers this chat; until then
+        // nothing but the manual is available.
+        if (message?.contact) {
+          console.log(`[telegram] <- chat=${message.chat.id} shared a contact`);
+          const registered = await registerContact(
+            String(message.chat.id),
+            message.chat.first_name ?? message.chat.username ?? `telegram:${message.chat.id}`,
+            message.contact,
+            message.from?.id,
+          );
+          await sendReply(message.chat.id, registered);
+          // Straight on into setup (or the manual for an existing shop).
+          if (registered.removeKeyboard) await sendReply(message.chat.id, await handleMessage(message, "/start"));
+          continue;
+        }
+        const isManual = (callback?.data ?? "").startsWith("help:") || /^\/help\b/i.test(text ?? "");
+        if (chat && (callback || text) && !isManual && !(await isRegistered(String(chat.id)))) {
+          if (callback) await answerCallback(callback.id);
+          await sendReply(chat.id, registrationPrompt());
+          continue;
+        }
+
         if (callback?.data && callback.message) {
           // A button press runs the same core handlers a typed message
           // does, so the two paths cannot drift apart.
@@ -345,10 +389,11 @@ async function setBotProfile(): Promise<void> {
       {
         commands: [
           { command: "start", description: "Get set up in under a minute" },
-          { command: "zbill", description: "Make a bill: /zbill Rahul 2 samosa 1 chai" },
-          { command: "add", description: "Save prices: /add paneer 220" },
+          { command: "zbill", description: "Make a bill — tap, then type the order" },
+          { command: "add", description: "Save prices — tap, then type item and price" },
           { command: "prices", description: "See your price list" },
-          { command: "sales", description: "Today's sales" },
+          { command: "sales", description: "Sales & ledger — pick a period" },
+          { command: "customers", description: "One customer's bills — pick a person" },
           { command: "open", description: "Bills not confirmed yet" },
           { command: "help", description: "Everything I can do" },
         ],

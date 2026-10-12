@@ -17,7 +17,8 @@
     "exp:5": "npm run build && node dist/eval/experiments/runExp5.js",
     "eval:names": "npm run build && node --env-file-if-exists=.env dist/eval/nameExtraction.js",
     "eval:typos": "npm run build && node --env-file-if-exists=.env dist/eval/typoBilling.js",
-    "eval:hinglish": "npm run build && node --env-file-if-exists=.env dist/eval/hinglish.js"
+    "eval:hinglish": "npm run build && node --env-file-if-exists=.env dist/eval/hinglish.js",
+    "eval:e2e": "npm run build && node --env-file-if-exists=.env dist/eval/e2e.js"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",

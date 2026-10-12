@@ -6,14 +6,17 @@
 // hit "I don't have a price for paneer" — the worst possible first
 // impression for a product whose whole promise is "just type the order".
 //
-// Three questions, in the order they pay off:
+// Registration is four things and nothing more (the phone number is shared
+// first, through Telegram — see registration.ts):
 //   kind    -> picks a sensible bill style, so nobody has to browse six
-//   name    -> the line at the top of every bill they will ever send
-//   prices  -> the ONLY one that actually unblocks billing
+//   name    -> the line at the top of every bill they will ever send.
+//              REQUIRED: skipped, the seller's Telegram name printed on
+//              customer bills in its place.
+//   prices  -> the ONLY one that actually unblocks billing; skippable
 //
-// Everything else Likho needs (phone, UPI, GSTIN, customers, aliases) is
-// learned from real usage. Asking for it up front would be a CRM form,
-// which is exactly what the product direction forbids.
+// Everything else Likho needs (UPI, GSTIN, customers, aliases) is learned
+// from real usage. Asking for it up front would be a CRM form, which is
+// exactly what the product direction forbids.
 //
 // This file is pure and deterministic: no model, no database, no channel.
 // It decides what to ASK and how to READ an answer; messageHandler.ts does
@@ -153,7 +156,7 @@ export function isSkip(raw: string): boolean {
 
 // --- Reading a shop name --------------------------------------------------
 
-export type NameProblem = "empty" | "looks_like_an_order" | "too_long";
+export type NameProblem = "empty" | "looks_like_an_order" | "too_long" | "required";
 export type NameRead = { name: string } | { problem: NameProblem };
 
 const MAX_NAME_LENGTH = 60;
@@ -212,11 +215,10 @@ export function welcomeQuestion(retry: boolean): Question {
       "Three quick questions and you're set.\n\nFirst — what do you sell?";
 
   return {
-    text: `${opening}\n\n${list}\n\nOr say *skip* and start billing right away.`,
+    text: `${opening}\n\n${list}`,
     actions: [
       ...BUSINESS_KINDS.map((k) => ({ label: k.label, action: encodeKind(k.id) })),
       sampleAction,
-      skipAction("Skip setup"),
     ],
   };
 }
@@ -230,8 +232,10 @@ export function nameQuestion(kind: BusinessKind, problem?: NameProblem): Questio
       ? "That looks like an order, not a name — and it would end up on every bill.\n\n"
       : problem === "too_long"
         ? `That's longer than ${MAX_NAME_LENGTH} characters. Something shorter?\n\n`
-        : problem === "empty"
-          ? ""
+        : problem === "required"
+          ? "Your shop name is needed — it goes at the top of every bill.\n\n"
+          : problem === "empty"
+            ? ""
           : `Good — ${kind.label.replace(/^\S+\s/, "")}. Your bills will use a style made for that.\n\n`;
 
   const escape =
@@ -239,10 +243,7 @@ export function nameQuestion(kind: BusinessKind, problem?: NameProblem): Questio
       ? '\n\nIf that really is the name, send:  shop name <your name>'
       : "";
 
-  return {
-    text: `${preface}${ask}${escape}`,
-    actions: [skipAction("Skip — decide later")],
-  };
+  return { text: `${preface}${ask}${escape}` };
 }
 
 export function pricesQuestion(kind: BusinessKind, shopName: string | null): Question {

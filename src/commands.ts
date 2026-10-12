@@ -10,40 +10,6 @@
 
 import { suggestFromList } from "./nearName.js";
 
-export const HELP = `Likho \u2014 send me the order, I'll make the bill.
-
-Just type it. No commands needed:
-  Ravi 2 paneer 1 lassi
-
-Or forward the customer's message straight to me.
-
-Set your rates first, one per line:
-  /add paneer 220
-  lassi 80
-  samosa 20
-
-Then talk to me normally:
-  actually paneer was 3    fix the open bill
-  add 2 samosa             add to it
-  remove lassi             take it off
-  show #1042               see any bill
-  #1042 paid               record payment
-  sales                    today's total
-  yesterday sales          any day, week or month
-
-Your bill's look:
-  bill format              see all 6 styles, pick one
-  shop phone 98200 41122   your details on the bill
-  shop gstin 27AAB...      add GST, UPI, address
-
-When a name could mean two things I ask once and remember your answer:
-  what have you learned    see what you've taught me
-  forget paner             undo one
-
-Buttons on each bill do the same thing.
-
-  setup                    redo your shop setup`;
-
 // Saves prices in whatever shape the seller typed them - see priceList.ts.
 // Partial success is deliberate: an unreadable fragment must never discard
 // the items that WERE understood.
@@ -68,7 +34,7 @@ export const KNOWN_COMMANDS = [
   "/start", "/help", "/add", "/prices", "/list", "/items", "/menu", "/rates", "/remove",
   "/zbill", "/plus", "/additem", "/minus", "/removeitem",
   "/bill", "/done", "/sales", "/paid", "/open", "/rename", "/learned", "/forget",
-  "/format", "/style", "/shop", "/pdf", "/setup", "/mock",
+  "/format", "/style", "/shop", "/pdf", "/setup", "/mock", "/customers",
 ];
 
 export interface ParsedCommand {

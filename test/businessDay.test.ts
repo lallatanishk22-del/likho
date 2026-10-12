@@ -99,11 +99,19 @@ test("'today' is the current business day", () => {
   });
 });
 
-test("'this week' covers the last 7 days including today", () => {
+test("'this week' is the calendar week, Monday to today", () => {
   const r = parseDateRange("this week sales", NOW, IST)!;
-  assert.equal(r.label, "Last 7 days");
-  assert.equal(r.from.toISOString(), "2026-09-03T18:30:00.000Z"); // 4 Sep IST
+  assert.equal(r.label, "This week");
+  assert.equal(r.from.toISOString(), "2026-09-06T18:30:00.000Z"); // Mon 7 Sep IST
   assert.equal(r.to.toISOString(), "2026-09-10T18:30:00.000Z");
+});
+
+test("'last week' is the previous Monday to Sunday, not the last 7 days", () => {
+  const r = parseDateRange("last week sales", NOW, IST)!;
+  assert.equal(r.label, "Last week");
+  assert.equal(r.from.toISOString(), "2026-08-30T18:30:00.000Z"); // Mon 31 Aug IST
+  assert.equal(r.to.toISOString(), "2026-09-06T18:30:00.000Z"); // up to Mon 7 Sep
+  assert.equal(parseDateRange("last 7 days", NOW, IST)!.label, "Last 7 days");
 });
 
 test("'this month' starts on the 1st", () => {
@@ -137,4 +145,26 @@ test("a date later this year means last year, not the future", () => {
 test("a full numeric date with year is respected", () => {
   const r = parseDateRange("sales 8/9/2025", NOW, IST)!;
   assert.match(r.label, /8 Sept? 2025/);
+});
+
+test("months, weeks, days and years further back, all reading back from their label", () => {
+  const cases: [string, string, string, string][] = [
+    // text, label, from (IST midnight as UTC), to
+    ["2 months bill", "Last 2 months", "2026-07-31T18:30:00.000Z", "2026-09-10T18:30:00.000Z"],
+    ["last 3 months", "Last 3 months", "2026-06-30T18:30:00.000Z", "2026-09-10T18:30:00.000Z"],
+    ["last 14 days", "Last 14 days", "2026-08-27T18:30:00.000Z", "2026-09-10T18:30:00.000Z"],
+    ["2 weeks", "Last 14 days", "2026-08-27T18:30:00.000Z", "2026-09-10T18:30:00.000Z"],
+    ["this year", "This year", "2025-12-31T18:30:00.000Z", "2026-09-10T18:30:00.000Z"],
+    ["last year", "Last year", "2024-12-31T18:30:00.000Z", "2025-12-31T18:30:00.000Z"],
+    ["sales for 2025", "2025", "2024-12-31T18:30:00.000Z", "2025-12-31T18:30:00.000Z"],
+  ];
+  for (const [text, label, from, to] of cases) {
+    const r = parseDateRange(text, NOW, IST)!;
+    assert.equal(r.label, label, text);
+    assert.equal(r.from.toISOString(), from, text);
+    assert.equal(r.to.toISOString(), to, text);
+    const back = parseDateRange(r.label, NOW, IST)!;
+    assert.equal(back.from.getTime(), r.from.getTime(), `${text}: label must read back`);
+  }
+  assert.equal(parseDateRange("september 2026", NOW, IST)!.label, "September 2026");
 });

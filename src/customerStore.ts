@@ -134,6 +134,25 @@ export function pickCustomer<T extends { name: string }>(
   return match.kind === "found" ? match.customer : null;
 }
 
+// Customers in the order they were last billed — the people a seller is
+// most likely looking for come first.
+export async function recentCustomers(
+  businessId: string,
+  limit: number,
+): Promise<{ id: string; name: string }[]> {
+  const bills = (await rest(
+    `bill_sessions?business_id=eq.${businessId}&customer_id=not.is.null` +
+      `&order=created_at.desc&select=customer_id&limit=500`,
+  )) as { customer_id: string }[];
+  const ids = [...new Set(bills.map((b) => b.customer_id))].slice(0, limit);
+  if (ids.length === 0) return [];
+  const rows = (await rest(
+    `customers?business_id=eq.${businessId}&id=in.(${ids.join(",")})&select=id,name`,
+  )) as { id: string; name: string }[];
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  return ids.map((id) => byId.get(id)).filter((c): c is { id: string; name: string } => c !== undefined);
+}
+
 export async function listCustomers(businessId: string): Promise<CustomerRow[]> {
   return (await rest(
     `customers?business_id=eq.${businessId}&order=name.asc&select=*`,

@@ -3,13 +3,11 @@ import {
   findCustomer, findCustomerInMessage, loadCustomerHistory, listOutstanding,
   listCustomers, settleAllForCustomer, pendingSettlement, rememberCustomer,
 } from "./customerStore.js";
-import { loadBusinessProfile } from "./businessProfile.js";
-import { toStatementData } from "./billRender.js";
-import { renderStatement } from "./templates/statement.js";
-import { htmlToPdf, PdfUnavailableError } from "./billPdf.js";
 import { parseDateRange, stripDateExpressions } from "./businessDay.js";
 import { formatRupees, titleCase, historyRow, alignedBlock } from "./chatFormat.js";
 import { escapeHtml } from "./billText.js";
+import { buildLedger } from "./ledger.js";
+import { ledgerAction, ledgerPdfReply } from "./ledgerReply.js";
 import { encodeMerge } from "./actionCodes.js";
 
 // Everything about a PERSON rather than a bill: their history, what they
@@ -50,34 +48,18 @@ export async function handleCustomerHistory(
 
   const rows = history.bills.map(historyRow);
 
-  // Drafts are counted SEPARATELY and always shown. Previously the whole
-  // summary was skipped when nothing was confirmed, so a customer with two
-  // draft bills saw no total at all — the money was simply invisible.
-  const draftBills = history.allBills.filter((b) => b.status !== "finalized");
-  const draftTotal =
-    Math.round(draftBills.reduce((sum, b) => sum + Number(b.total), 0) * 100) / 100;
-
+  // Same rule as the sales ledger: every bill counts, split Billed /
+  // Received / Due. Drafts are counted, not set aside — a customer whose
+  // bills were never confirmed used to show "not counted" for money they
+  // really owed.
+  const ledger = buildLedger(range?.label ?? "All time", history.allBills);
   const billRows = rows.map((r) => ({ left: r.no, amount: r.amount, right: r.when + (r.mark ? `  ${r.mark}` : "") }));
-
-  const summaryRows: { left: string; amount: string; right?: string }[] = [];
-  if (history.billCount > 0) {
-    summaryRows.push({
-      left: `${history.billCount} bill${history.billCount === 1 ? "" : "s"}`,
-      amount: formatRupees(history.lifetimeTotal),
-    });
-    if (history.outstanding > 0) {
-      summaryRows.push({ left: "unpaid", amount: formatRupees(history.outstanding) });
-    } else {
-      summaryRows.push({ left: "all paid", amount: "" });
-    }
-  }
-  if (draftBills.length > 0) {
-    summaryRows.push({
-      left: `${draftBills.length} draft${draftBills.length === 1 ? "" : "s"}`,
-      amount: formatRupees(draftTotal),
-      right: "not counted",
-    });
-  }
+  const n = ledger.rows.length;
+  const summaryRows: { left: string; amount: string; right?: string }[] = [
+    { left: `${n} bill${n === 1 ? "" : "s"}`, amount: formatRupees(ledger.billed) },
+    { left: "received", amount: formatRupees(ledger.received) },
+    { left: "due", amount: formatRupees(ledger.due) },
+  ];
 
   // The bills align among themselves. The summary is right-aligned to the
   // block edge instead of sharing their columns: forcing "4 drafts" into
@@ -111,6 +93,7 @@ export async function handleCustomerHistory(
   return {
     text:
       `<pre>${escapeHtml(block)}</pre>` +
+      (ledger.unconfirmedCount > 0 ? `\n${ledger.unconfirmedCount} not confirmed yet.` : "") +
       (more ? `\nShowing the latest ${history.bills.length} of ${history.allBills.length}.` : ""),
     parseMode: "HTML" as const,
     // The most recent few, tappable — scrolling a chat to find a number and
@@ -120,7 +103,8 @@ export async function handleCustomerHistory(
         label: `#${b.bill_no} · ${formatRupees(Number(b.total))}`,
         action: `open:${b.bill_no}`,
       })),
-      { label: "📄 Statement PDF", action: `stmt:${customer.id}` },
+      { label: "📄 Ledger PDF", action: ledgerAction(range ?? null, customer.id) },
+      { label: "📅 Other period", action: `cust:${customer.id}:pick` },
     ],
   };
 }
@@ -164,40 +148,8 @@ export async function handleStatement(
   if (!customer) return { text: `I don't have anyone called "${name}" yet.` };
 
   await rememberCustomer(businessId, customer.id);
-
-  const history = await loadCustomerHistory(businessId, customer, range, 1000);
-  if (history.allBills.length === 0) {
-    return {
-      text: `${titleCase(customer.name)} has no bills${range ? ` in ${range.label.toLowerCase()}` : ""}.`,
-    };
-  }
-
-  const business = await loadBusinessProfile(businessId);
-  const data = await toStatementData(history, business, history.allBills);
-
-  try {
-    const path = await htmlToPdf(renderStatement(data), `statement-${customer.name}`);
-    return {
-      text: "",
-      document: {
-        path,
-        caption:
-          `${titleCase(customer.name)} · ${data.periodLabel}\n` +
-          (data.billCount > 0
-            ? `${data.billCount} bill(s) · ${formatRupees(data.grandTotal)} billed · ` +
-              `${formatRupees(data.outstanding)} outstanding`
-            : "No confirmed bills") +
-          (data.draftCount > 0
-            ? `\n${data.draftCount} draft(s) · ${formatRupees(data.draftTotal)} — not counted`
-            : ""),
-      },
-    };
-  } catch (err) {
-    if (err instanceof PdfUnavailableError) {
-      return { text: "I can't make PDFs on this machine — no Chrome found." };
-    }
-    throw err;
-  }
+  // The customer's ledger: the same sheet as the sales ledger, one person.
+  return await ledgerPdfReply(businessId, range, { id: customer.id, name: customer.name });
 }
 
 // Settling a whole account. Money changing across several bills at once

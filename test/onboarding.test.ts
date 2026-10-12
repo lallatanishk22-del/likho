@@ -107,14 +107,15 @@ test("a skip word inside a real answer does not abandon setup", () => {
   assert.equal(isSkip("no onion pizza 200"), false);
 });
 
-test("every question offers a way out", () => {
+test("only the price question can be skipped; the shop name is required", () => {
+  // Skipping the name printed the seller's Telegram name on customer bills.
   const kind = BUSINESS_KINDS[0]!;
-  for (const q of [welcomeQuestion(false), nameQuestion(kind), pricesQuestion(kind, "Test")]) {
-    assert.ok(
-      q.actions?.some((a) => a.action === SKIP_ACTION),
-      "a setup question with no skip is a trap",
-    );
+  assert.ok(pricesQuestion(kind, "Test").actions?.some((a) => a.action === SKIP_ACTION));
+  for (const q of [welcomeQuestion(false), nameQuestion(kind)]) {
+    assert.ok(!q.actions?.some((a) => a.action === SKIP_ACTION), q.text);
   }
+  // The first question is still never a dead end: a kind, or the sample menu.
+  assert.ok((welcomeQuestion(false).actions?.length ?? 0) >= 5);
 });
 
 // --- Reading a shop name --------------------------------------------------

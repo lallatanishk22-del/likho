@@ -1,12 +1,16 @@
 import { routeParseOrder, RoutingFailedError } from "./router.js";
 import { applyClarification } from "./clarification.js";
+import { sellerFacing, classifyError } from "./sellerError.js";
+import { manualHome, manualTopic } from "./manual.js";
+import { getLedger, getLedgerCustomer } from "./ledger.js";
+import { ledgerAction, decodeLedgerAction, ledgerPdfReply, summaryText } from "./ledgerReply.js";
 import { joinGroupedNumbers } from "./groupedNumbers.js";
 import { calculateBill } from "./calculator.js";
 import { formatBill } from "./formatter.js";
 import {
   getOrCreateBusinessForChannel, loadCatalog, upsertProduct, deactivateProduct,
   renameProduct, addAlias, setPendingResolution, takePendingResolution, getProductById,
-  setPendingClarification, takePendingClarification, CLARIFY_PREFIX, PRICE_QUESTION,
+  setPendingClarification, takePendingClarification, CLARIFY_PREFIX, PRICE_QUESTION, AWAIT_COMMAND,
   loadAliases, forgetAlias,
 } from "./catalogStore.js";
 import { suggestSpelling, findNearDuplicate } from "./spellingSuggest.js";
@@ -14,7 +18,6 @@ import {
   createBillSession,
   getCurrentDraft,
   finalizeBill,
-  getTodaysSales,
   addItemToBill,
   removeItemFromBill,
   getBillByNo,
@@ -23,7 +26,6 @@ import {
   recordPayment,
   setItemQuantity,
   getOpenBills,
-  getSales,
   setBillDiscount,
   findBillBySourceMessage,
   type StoredBill,
@@ -41,7 +43,7 @@ import { auditPriceList } from "./priceListAudit.js";
 import {
   handleCustomerHistory, handleOutstanding, handleStatement, handleSettle,
 } from "./customerHandlers.js";
-import { HELP, GREETING_REPLY, KNOWN_COMMANDS, splitCommands, type ParsedCommand } from "./commands.js";
+import { GREETING_REPLY, KNOWN_COMMANDS, splitCommands, type ParsedCommand } from "./commands.js";
 import { suggestFromList } from "./nearName.js";
 export { splitCommands, type ParsedCommand };
 import type {
@@ -83,11 +85,10 @@ import {
 import {
   CustomerAmbiguousError, findCustomer, findCustomerInMessage,
   loadCustomerHistory, listOutstanding, listCustomers,
-  settleAllForCustomer, pendingSettlement, rememberCustomer, recallCustomer,
+  settleAllForCustomer, pendingSettlement, rememberCustomer, recallCustomer, recentCustomers,
 } from "./customerStore.js";
-import { toBillData, toStatementData } from "./billRender.js";
+import { toBillData } from "./billRender.js";
 import { renderBill } from "./templates/index.js";
-import { renderStatement } from "./templates/statement.js";
 import { htmlToPdf, PdfUnavailableError } from "./billPdf.js";
 import { TEMPLATE_IDS, TEMPLATE_LABELS, asTemplateId } from "./billData.js";
 import { renderPreviews, previewData } from "./billPreviews.js";
@@ -516,20 +517,47 @@ async function handleSampleMenu(businessId: string): Promise<Reply> {
     };
   }
   await handleAdd(businessId, SAMPLE_MENU);
-  await setOnboardingStep(businessId, "done");
+  // The shop name is still required: tapped before it was given, the menu
+  // loads and the name question comes next instead of finishing setup.
+  const state = await loadOnboarding(businessId);
+  const needsName = state.step === "kind" || state.step === "name";
+  await setOnboardingStep(businessId, needsName ? "name" : "done");
   const list = SAMPLE_MENU.split("\n")
     .map((l) => `  ${titleCase(l.replace(/\s+\d+$/, ""))} — ${formatRupees(Number(l.match(/\d+$/)![0]))}`)
     .join("\n");
-  return {
-    text:
-      `Loaded a sample menu so you can try me:\n\n${list}\n\n` +
-      `These are sample prices. Change any one like:  chai 20\n\n` +
-      `Now send an order, just as you'd type it:\n  Rahul 2 samosa 1 chai`,
-  };
+  const loaded = `Loaded a sample menu so you can try me:\n\n${list}\n\nThese are sample prices. Change any one like:  chai 20`;
+  if (needsName) {
+    return { text: `${loaded}\n\nLast thing — ${nameQuestion(kindById(state.kindId), "empty").text.replace(/^W/, "w")}` };
+  }
+  return { text: `${loaded}\n\nNow send an order, just as you'd type it:\n  Rahul 2 samosa 1 chai` };
 }
 
+// Two signals that a setup answer is really an order: it names something
+// this shop sells, AND it carries a quantity (a digit or "do", "teen" …).
+// One alone is not enough — "Chai Point" names a product, "Cafe 24x7" has
+// a number, and both are shop names.
+async function isOrderForThisShop(businessId: string, text: string): Promise<boolean> {
+  if (!/\d/.test(text) && !hasNumeralWord(text)) return false;
+  const catalog = await loadCatalog(businessId);
+  if (catalog.products.length === 0) return false;
+  const index = buildCatalogIndex(catalog);
+  // "ambiguous" means it matches SEVERAL products — still a product
+  // mention. "ek paneer tikka aur do butter naan" names two, and counting
+  // that as "no product" saved the order as the shop name.
+  const found = (m: unknown) => m !== null;
+  return (
+    found(findProductByContainment(text, index)) ||
+    text.toLowerCase().split(/\s+/).some((w) => found(findProduct(w, index)))
+  );
+}
+
+// The skip button now exists only on the price question. An older message
+// may still carry one on an earlier question — that re-asks the question.
 async function handleSkipSetup(businessId: string): Promise<Reply> {
   const state = await loadOnboarding(businessId);
+  const kind = kindById(state.kindId);
+  if (state.step === "kind") return welcomeQuestion(false);
+  if (state.step === "name") return nameQuestion(kind, "required");
   await setOnboardingStep(businessId, "done");
   return { text: skippedMessage(state.step) };
 }
@@ -551,10 +579,15 @@ async function handleOnboarding(
   // Only these two commands are honoured mid-setup. Everything else is
   // read as an answer to the current question, which is what lets
   // "/add paneer 220" work as the reply to the price question.
-  if (first?.command === "/help") return { text: HELP };
+  if (first?.command === "/help") return manualHome();
   if (first?.command === "/setup") return await handleRestartSetup(businessId);
 
+  // ONLY PRICES CAN BE SKIPPED. A skipped shop name left the seller's
+  // Telegram name printed on customer bills. "Skip" at the first question
+  // just means "something else"; at the name question it is re-asked.
   if (isSkip(text)) {
+    if (state.step === "kind") return await applyKind(businessId, kindById("other"));
+    if (state.step === "name") return nameQuestion(kind, "required");
     await setOnboardingStep(businessId, "done");
     return { text: skippedMessage(state.step) };
   }
@@ -565,18 +598,24 @@ async function handleOnboarding(
       if (picked) return await applyKind(businessId, picked);
 
       // A seller who opens the bot and immediately types an order wants a
-      // bill, not a questionnaire. Being made to finish setup first is how
-      // this loses to a notebook.
-      if (looksLikeAnOrder(text)) {
+      // bill, not a questionnaire. If it can be priced, bill it now — the
+      // order is never dropped — and ask the shop name next.
+      if (looksLikeAnOrder(text) || (await isOrderForThisShop(businessId, text))) {
         const catalog = await loadCatalog(businessId);
+        await setOnboardingStep(businessId, "name");
         if (catalog.products.length > 0) {
-          await setOnboardingStep(businessId, "done");
-          return await handleOrder(businessId, text, sourceMessageId, incoming.onSlowWork);
+          const billed = await handleOrder(businessId, text, sourceMessageId, incoming.onSlowWork);
+          return { ...billed, follow: [...(billed.follow ?? []), nameQuestion(kind, "empty")] };
         }
-        // Nothing priced means the order genuinely cannot be billed. Skip
-        // the remaining questions down to the only one that unblocks it.
-        await setOnboardingStep(businessId, "prices");
-        return orderBeforePricesQuestion(kind);
+        // Nothing priced means the order genuinely cannot be billed yet.
+        // Two things unblock it — the shop name, then the prices — and the
+        // seller is told so, rather than the order quietly going nowhere.
+        return {
+          text:
+            "That's exactly how to talk to me. Before I can bill it I need two things: " +
+            "your shop name, then your prices. Then send the order again.\n\n" +
+            nameQuestion(kind, "empty").text,
+        };
       }
 
       const opening =
@@ -587,9 +626,24 @@ async function handleOnboarding(
     }
 
     case "name": {
+      // THE NAME IS REQUIRED, BUT NEVER IN THE WAY OF A BILL. A seller who
+      // has prices and sends an order gets the bill, then the question
+      // again. Making every order wait for a shop name blocked billing for
+      // anyone who used /add before finishing setup.
+      if (await isOrderForThisShop(businessId, text)) {
+        const billed = await handleOrder(businessId, text, sourceMessageId, incoming.onSlowWork);
+        return { ...billed, follow: [...(billed.follow ?? []), nameQuestion(kind, "empty")] };
+      }
       const read = readShopName(text);
       if ("problem" in read) return nameQuestion(kind, read.problem);
       await setBusinessField(businessId, "name", read.name);
+      // Prices already in (the sample menu, or a seller redoing setup):
+      // nothing left to ask.
+      const priced = await loadCatalog(businessId);
+      if (priced.products.length > 0) {
+        await setOnboardingStep(businessId, "done");
+        return finishedMessage(kind, read.name, priced.products.map((p) => p.name));
+      }
       await setOnboardingStep(businessId, "prices");
       return pricesQuestion(kind, read.name);
     }
@@ -653,7 +707,7 @@ async function handleOnboarding(
     }
 
     default:
-      return { text: HELP };
+      return manualHome();
   }
 }
 
@@ -921,6 +975,16 @@ async function handleOrder(
     return inside !== null && inside !== "ambiguous";
   };
 
+  // A REPORT IS NOT AN ORDER. "2 months bill" sent after /zbill was read as
+  // an order and asked for its items. A period + a report word + no product
+  // of this shop is a request for sales — a customer's if it names one.
+  if (looksLikeReportRequest(text) && !text.split(/\s+/).some((w) => namesAProduct(w.toLowerCase()))) {
+    const range = parseDateRange(text)!;
+    const named = await findCustomerInMessage(businessId, stripDateExpressions(text));
+    if (named && named !== "ambiguous") return await handleCustomerHistory(businessId, named.name, range);
+    return await handleSales(businessId, text);
+  }
+
   const extras = parseOrderExtras(text, namesAProduct);
   const { percent: statedDiscount, rest: withoutDiscount } = parseDiscount(extras.rest);
 
@@ -1051,14 +1115,17 @@ async function handleOrder(
         };
       }
     }
-    if (err instanceof RoutingFailedError || err instanceof CatalogResolutionError) {
+    // Only a real question is remembered for the seller's next reply; a
+    // network or model failure is not something they can answer.
+    const isQuestion = classifyError((err as Error).message) === "seller";
+    if (isQuestion && (err instanceof RoutingFailedError || err instanceof CatalogResolutionError)) {
       try {
         await setPendingClarification(businessId, text, (err as Error).message);
       } catch {
         // Losing the follow-up only means the seller retypes the order.
       }
     }
-    return { text: (err as Error).message };
+    return { text: sellerFacing(err) };
   }
 }
 
@@ -1230,7 +1297,8 @@ async function handleConfirm(
   }
 
   await finalizeBill(bill.session.id);
-  const sales = await getTodaysSales(businessId);
+  // The same ledger /sales reads, so "today" is one number everywhere.
+  const today = await getLedger(businessId, parseDateRange("today")!);
   const confirmed = {
     ...bill,
     session: { ...bill.session, status: "finalized" as const },
@@ -1243,9 +1311,9 @@ async function handleConfirm(
     text:
       `${reply.text}\n` +
       escapeHtml(
-        `Confirmed. Today: ${sales.count} bill(s), ${formatRupees(sales.total)}` +
-          (sales.openCount > 0
-            ? `\n${sales.openCount} still unconfirmed — say "open bills".`
+        `Confirmed. Today so far: ${today.rows.length} bill(s) · ${formatRupees(today.billed)} billed` +
+          (today.unconfirmedCount > 0
+            ? `\n${today.unconfirmedCount} still unconfirmed — say "open bills".`
             : ""),
       ),
   };
@@ -1308,44 +1376,139 @@ async function handleDone(businessId: string): Promise<Reply> {
 // made a dozen bills saw a total covering two of them, with no indication
 // the rest existed or how to find them.
 async function handleSales(businessId: string, text: string): Promise<Reply> {
-  // "sales", "yesterday sales", "sales 8 sep", "this month" — the period
-  // comes from the seller's own words; no period means today.
-  const range = parseDateRange(text);
-  const label = range?.label ?? "Today";
-  const s = await getSales(businessId, range ?? undefined);
-
-  if (s.count === 0 && s.openCount === 0) {
-    // "today"/"yesterday" read as adverbs; a named period needs "on".
+  // "sales", "yesterday sales", "sales 8 sep", "september sales", "this
+  // week" — the period comes from the seller's own words; none means today.
+  // Every bill in the period counts, split Billed / Received / Due — the
+  // same ledger the PDF prints, so the two always agree.
+  const range = parseDateRange(text) ?? parseDateRange("today")!;
+  const ledger = await getLedger(businessId, range);
+  if (ledger.rows.length === 0) {
     const when =
-      label === "Today" || label === "Yesterday"
-        ? label.toLowerCase()
-        : `in ${label.toLowerCase()}`.replace("in last 7 days", "in the last 7 days");
+      range.label === "Today" || range.label === "Yesterday" ? range.label.toLowerCase() : `in ${range.label.toLowerCase()}`;
     return { text: `Nothing billed ${when}.` };
   }
+  return {
+    text: summaryText(ledger, null),
+    parseMode: "HTML",
+    actions: [
+      { label: "\u{1f4c4} Ledger PDF", action: ledgerAction(range) },
+      { label: "\u{1f4c5} Other period", action: `${SALES_PREFIX}pick` },
+    ],
+  };
+}
 
-  const lines = [label];
+// Any line with a number followed by an item ("2 samosa") — currency words
+// after a price ("15 rs", "20 each", "50/-") do not count.
+export function looksLikeOrderLines(text: string): boolean {
+  return text
+    .split(/\r?\n/)
+    .some((line) => /\d\s+(?!rs\b|rs\.|rupees?\b|each\b|only\b)[^\d\s₹/]/i.test(line));
+}
 
-  if (s.count > 0) {
-    lines.push("", `${s.count} confirmed \u2014 ${formatRupees(s.total)}`);
-    if (s.unpaidTotal > 0) {
-      lines.push(`  ${formatRupees(s.paidTotal)} collected`);
-      lines.push(`  ${formatRupees(s.unpaidTotal)} still owed`);
-    } else {
-      lines.push("  all paid");
-    }
-  } else {
-    lines.push("", "Nothing confirmed yet.");
+// Two signals, not one. A period word plus "bill" also describes a real
+// order — "aaj ka bill 2 momos ₹50" was answered with today's sales and the
+// order vanished. So a report request may hold no number except the ones
+// that ARE the period ("2 months", "14 sept", "2025"); a quantity or a price
+// left over means it is an order.
+const MONTH_WORD = "(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*";
+const PERIOD_NUMBERS = new RegExp(
+  [
+    "\\d{1,3}\\s+(?:days?|din|weeks?|hafte|months?|mahine)\\b",
+    "\\b20\\d{2}\\b",
+    "\\b\\d{1,2}[/-]\\d{1,2}(?:[/-]\\d{2,4})?\\b",
+    `\\b\\d{1,2}\\s*(?:st|nd|rd|th)?\\s+${MONTH_WORD}\\b`,
+    `\\b${MONTH_WORD}\\s+\\d{1,2}\\b`,
+  ].join("|"),
+  "gi",
+);
+
+// Words that only ever describe a period. A message made of nothing else
+// ("last 3 months") is a report request even without "sales" in it.
+const PERIOD_ONLY_WORDS = new RegExp(
+  `\\b(?:last|past|this|previous|pichle|is|the|of|for|in|ka|ki|ke|months?|weeks?|years?|days?|din|hafte|mahine|saal|today|yesterday|aaj|${MONTH_WORD})\\b`,
+  "gi",
+);
+
+export function looksLikeReportRequest(text: string): boolean {
+  if (parseDateRange(text) === null) return false;
+  const withoutPeriod = text.replace(PERIOD_NUMBERS, " ");
+  if (/\d/.test(withoutPeriod)) return false;
+  const reportWord = /\b(bills?|sales?|report|hisa+b|ledger|statement|kitna|total)\b/i.test(text);
+  const onlyAPeriod = withoutPeriod.replace(PERIOD_ONLY_WORDS, " ").trim().length === 0;
+  return reportWord || onlyAPeriod;
+}
+
+// Every period is one tap. Button data is the period's own label, which
+// parseDateRange reads back — the same round trip the ledger button uses.
+const SALES_PREFIX = "sales:";
+const SALES_PERIODS = [
+  "Today", "Yesterday", "This week", "Last week", "This month", "Last month", "Last 3 months", "This year",
+];
+
+function salesPeriodPicker(): Reply {
+  return {
+    text:
+      "Sales for which period?\n\n" +
+      "Or type one, like:  sales 14 sept  ·  september sales  ·  last 6 months  ·  2025",
+    actions: [
+      ...SALES_PERIODS.map((p) => ({ label: p, action: `${SALES_PREFIX}${p}` })),
+      { label: "\u{1f464} One customer", action: `${CUSTOMER_PREFIX}list` },
+    ],
+  };
+}
+
+// The same, for one person: pick the customer, then the period. Button data
+// is "cust:<id>:<period label>" — within Telegram's 64 bytes for any label.
+const CUSTOMER_PREFIX = "cust:";
+const CUSTOMER_LIST_SIZE = 12;
+
+// Person first, then surname, then period. Customers are grouped by first
+// name: a first name with one customer goes straight to the period; one
+// shared by several ("Ravi", "Ravi Jerath") asks which, by surname.
+const FIRST_NAME_PREFIX = "custname:";
+const firstNameOf = (name: string) => name.trim().split(/\s+/)[0]!.toLowerCase();
+
+async function customerPicker(businessId: string): Promise<Reply> {
+  const customers = await recentCustomers(businessId, 60);
+  if (customers.length === 0) {
+    return { text: "No customers yet. A bill with a name, like  Rahul 2 samosa, adds one." };
   }
-
-  if (s.openCount > 0) {
-    lines.push(
-      "",
-      `${s.openCount} unconfirmed \u2014 ${formatRupees(s.openTotal)}`,
-      "These aren't counted yet. Say \"open bills\" to see them.",
-    );
+  const groups = new Map<string, { id: string; name: string }[]>();
+  for (const c of customers) {
+    const key = firstNameOf(c.name);
+    groups.set(key, [...(groups.get(key) ?? []), c]);
   }
+  return {
+    text: "Whose bills?\n\n" + `Most recent first. Someone not here? Type:  rahul bills`,
+    actions: [...groups.entries()].slice(0, CUSTOMER_LIST_SIZE).map(([first, people]) => ({
+      label: `${titleCase(first)}${people.length > 1 ? ` (${people.length})` : ""}`.slice(0, 24),
+      action:
+        people.length === 1
+          ? `${CUSTOMER_PREFIX}${people[0]!.id}:pick`
+          : `${FIRST_NAME_PREFIX}${first.slice(0, 40)}`,
+    })),
+  };
+}
 
-  return { text: lines.join("\n") };
+// Every customer sharing a first name — the whole list, not only recent ones.
+async function surnamePicker(businessId: string, first: string): Promise<Reply> {
+  const people = (await listCustomers(businessId)).filter((c) => firstNameOf(c.name) === first);
+  if (people.length === 0) return await customerPicker(businessId);
+  if (people.length === 1) return customerPeriodPicker(people[0]!);
+  return {
+    text: `Which ${titleCase(first)}?`,
+    actions: people.map((c) => ({ label: titleCase(c.name).slice(0, 30), action: `${CUSTOMER_PREFIX}${c.id}:pick` })),
+  };
+}
+
+function customerPeriodPicker(customer: { id: string; name: string }): Reply {
+  return {
+    text: `${titleCase(customer.name)} — which period?`,
+    actions: ["All time", ...SALES_PERIODS].map((p) => ({
+      label: p,
+      action: `${CUSTOMER_PREFIX}${customer.id}:${p}`,
+    })),
+  };
 }
 
 async function handleOpenBills(businessId: string): Promise<Reply> {
@@ -1423,7 +1586,7 @@ export async function handleIncoming(incoming: IncomingMessage): Promise<Reply> 
   try {
     businessId = await resolveBusiness(incoming);
   } catch (err) {
-    return { text: `Couldn't reach the price store: ${(err as Error).message}` };
+    return { text: sellerFacing(err) };
   }
 
   // A forwarded message IS the order. The seller forwarded it precisely so
@@ -1477,6 +1640,18 @@ export async function handleIncoming(incoming: IncomingMessage): Promise<Reply> 
     } catch {
       // Same rule as above: a failed lookup never blocks the message.
     }
+    // AN ORDER IS NOT A PRICE LIST — the guard setup already has, needed
+    // again here. After a bare /add, "Rahul 2 samosa" typed minutes later
+    // was saved as a product "Rahul" at ₹2. A price line ends in its price;
+    // a number with an item after it is an order, handled as one.
+    const orderShapedForAdd =
+      clarified?.question === AWAIT_COMMAND && clarified.message === "/add" && looksLikeOrderLines(trimmed);
+    if (clarified?.question === AWAIT_COMMAND && !orderShapedForAdd) {
+      return remember(
+        businessId,
+        await runCommand(businessId, incoming, clarified.message, trimmed, trimmed, sourceMessageId),
+      );
+    }
     if (clarified?.question === PRICE_QUESTION) {
       const price = trimmed.match(/^(?:₹|rs\.?)?\s*(\d+(?:\.\d{1,2})?)$/i)?.[1];
       if (price) return await handleAdd(businessId, `${clarified.message} ${price}`);
@@ -1495,12 +1670,20 @@ export async function handleIncoming(incoming: IncomingMessage): Promise<Reply> 
         return await handleOnboarding(businessId, onboarding, incoming, trimmed, sourceMessageId);
       }
     } catch (err) {
-      return { text: `Something went wrong: ${(err as Error).message}` };
+      return { text: sellerFacing(err) };
     }
   }
 
   // Explicit commands still win — a seller who typed one meant it.
   if (isCommand) {
+    // A new command means the seller moved on: whatever the last reply was
+    // waiting for (a bare "/zbill", a quantity, a price) no longer is, and
+    // must not swallow a message typed later.
+    try {
+      await takePendingClarification(businessId);
+    } catch {
+      // A failed clear never blocks the command.
+    }
     const replies: Reply[] = [];
     // Each command in one message gets its own id, so "/zbill 2 chai
     // /zbill 3 samosa" is two bills — and a redelivery maps to the same ids.
@@ -1534,6 +1717,23 @@ async function remember(businessId: string, reply: Reply): Promise<Reply> {
     // Never let bookkeeping swallow a reply the seller is waiting on.
   }
   return reply;
+}
+
+// A command sent with nothing after it — usually tapped from Telegram's
+// menu, which sends at once. The next message becomes its arguments, and
+// the typing box opens with an example in it.
+async function awaitArguments(
+  businessId: string,
+  command: string,
+  prompt: string,
+  placeholder: string,
+): Promise<Reply> {
+  try {
+    await setPendingClarification(businessId, command, AWAIT_COMMAND);
+  } catch {
+    // Without the note the seller simply retypes the command with the order.
+  }
+  return { text: prompt, inputPlaceholder: placeholder };
 }
 
 // Natural-language dispatch. This is what makes commands optional.
@@ -1575,7 +1775,7 @@ async function runIntent(
   try {
     switch (intent.name) {
       case "help":
-        return { text: HELP };
+        return manualHome();
       case "setup":
         return await handleRestartSetup(businessId);
       case "greeting":
@@ -1751,18 +1951,23 @@ async function runIntent(
     // and pdf all address a bill by name, and all owe the seller the same
     // answer when that name fits two people.
     if (err instanceof CustomerAmbiguousError) return askWhichCustomer(err);
-    return { text: `Something went wrong: ${(err as Error).message}` };
+    return { text: sellerFacing(err) };
   }
 }
 
 // A button press runs the SAME handlers a typed message does, so the two
 // can never drift apart. The action string is opaque to the channel.
 export async function handleAction(incoming: IncomingMessage, action: string): Promise<Reply> {
+  // The manual touches no data, so it answers even when the records can't
+  // be reached — that is exactly when a seller opens it.
+  const topic = manualTopic(action);
+  if (topic) return topic;
+
   let businessId: string;
   try {
     businessId = await resolveBusiness(incoming);
   } catch (err) {
-    return { text: `Couldn't reach the price store: ${(err as Error).message}` };
+    return { text: sellerFacing(err) };
   }
 
   // A spelling fix carries two names rather than a bill number, so it is
@@ -1778,7 +1983,55 @@ export async function handleAction(incoming: IncomingMessage, action: string): P
     try {
       return await applyKind(businessId, kind);
     } catch (err) {
-      return { text: `Something went wrong: ${(err as Error).message}` };
+      return { text: sellerFacing(err) };
+    }
+  }
+
+  if (action.startsWith(FIRST_NAME_PREFIX)) {
+    try {
+      return await surnamePicker(businessId, action.slice(FIRST_NAME_PREFIX.length));
+    } catch (err) {
+      return { text: sellerFacing(err) };
+    }
+  }
+
+  if (action.startsWith(CUSTOMER_PREFIX)) {
+    try {
+      const rest = action.slice(CUSTOMER_PREFIX.length);
+      if (rest === "list") return await customerPicker(businessId);
+      const m = rest.match(/^([0-9a-f-]{36}):(.+)$/i);
+      if (!m) return await customerPicker(businessId);
+      const customer = await getLedgerCustomer(businessId, m[1]!);
+      if (!customer) return { text: "I can't find that customer any more." };
+      if (m[2] === "pick") return customerPeriodPicker(customer);
+      const range = m[2] === "All time" ? null : parseDateRange(m[2]!);
+      return await handleCustomerHistory(businessId, customer.name, range);
+    } catch (err) {
+      return { text: sellerFacing(err) };
+    }
+  }
+
+  if (action.startsWith(SALES_PREFIX)) {
+    const period = action.slice(SALES_PREFIX.length);
+    if (period === "pick") return salesPeriodPicker();
+    try {
+      return await handleSales(businessId, period);
+    } catch (err) {
+      return { text: sellerFacing(err) };
+    }
+  }
+
+  const ledgerRequest = decodeLedgerAction(action);
+  if (ledgerRequest) {
+    try {
+      await incoming.onSlowWork?.();
+      const customer = ledgerRequest.customerId
+        ? await getLedgerCustomer(businessId, ledgerRequest.customerId)
+        : null;
+      if (ledgerRequest.customerId && !customer) return { text: "I can't find that customer any more." };
+      return await ledgerPdfReply(businessId, ledgerRequest.range, customer);
+    } catch (err) {
+      return { text: sellerFacing(err) };
     }
   }
 
@@ -1786,7 +2039,7 @@ export async function handleAction(incoming: IncomingMessage, action: string): P
     try {
       return await handleSampleMenu(businessId);
     } catch (err) {
-      return { text: `Something went wrong: ${(err as Error).message}` };
+      return { text: sellerFacing(err) };
     }
   }
 
@@ -1796,7 +2049,7 @@ export async function handleAction(incoming: IncomingMessage, action: string): P
       if (action === FORMAT_ACTION) return await handleBillFormat(businessId, incoming.onSlowWork);
       return await handleBusinessInfo(businessId, "");
     } catch (err) {
-      return { text: `Something went wrong: ${(err as Error).message}` };
+      return { text: sellerFacing(err) };
     }
   }
 
@@ -1818,7 +2071,7 @@ export async function handleAction(incoming: IncomingMessage, action: string): P
           `${formatRupees(done.amount)} recorded as received.`,
       };
     } catch (err) {
-      return { text: `Something went wrong: ${(err as Error).message}` };
+      return { text: sellerFacing(err) };
     }
   }
 
@@ -1830,7 +2083,7 @@ export async function handleAction(incoming: IncomingMessage, action: string): P
       if (!customer) return { text: "That customer isn't in your list any more." };
       return await handleStatement(businessId, customer.name, null, incoming.onSlowWork);
     } catch (err) {
-      return { text: `Something went wrong: ${(err as Error).message}` };
+      return { text: sellerFacing(err) };
     }
   }
 
@@ -1841,7 +2094,7 @@ export async function handleAction(incoming: IncomingMessage, action: string): P
       if (!bill) return { text: `I don't have a bill #${openNo}.` };
       return billReply(bill);
     } catch (err) {
-      return { text: `Something went wrong: ${(err as Error).message}` };
+      return { text: sellerFacing(err) };
     }
   }
 
@@ -1854,7 +2107,7 @@ export async function handleAction(incoming: IncomingMessage, action: string): P
         text: `Your bills now use the ${label.name} style.\n\nTap PDF on any bill to get it.`,
       };
     } catch (err) {
-      return { text: `Something went wrong: ${(err as Error).message}` };
+      return { text: sellerFacing(err) };
     }
   }
 
@@ -1876,7 +2129,7 @@ export async function handleAction(incoming: IncomingMessage, action: string): P
         actions: rerun.actions,
       };
     } catch (err) {
-      return { text: `Something went wrong: ${(err as Error).message}` };
+      return { text: sellerFacing(err) };
     }
   }
 
@@ -1890,7 +2143,7 @@ export async function handleAction(incoming: IncomingMessage, action: string): P
           `Bills already made keep the price they were made with.`,
       };
     } catch (err) {
-      return { text: `Something went wrong: ${(err as Error).message}` };
+      return { text: sellerFacing(err) };
     }
   }
 
@@ -1904,7 +2157,7 @@ export async function handleAction(incoming: IncomingMessage, action: string): P
           : `"${drop}" isn't in your price list any more.`,
       };
     } catch (err) {
-      return { text: `Something went wrong: ${(err as Error).message}` };
+      return { text: sellerFacing(err) };
     }
   }
 
@@ -1913,7 +2166,7 @@ export async function handleAction(incoming: IncomingMessage, action: string): P
     try {
       return await handleRename(businessId, `${fix.from} to ${fix.to}`);
     } catch (err) {
-      return { text: `Something went wrong: ${(err as Error).message}` };
+      return { text: sellerFacing(err) };
     }
   }
 
@@ -1940,7 +2193,7 @@ export async function handleAction(incoming: IncomingMessage, action: string): P
         return { text: "That action isn't available." };
     }
   } catch (err) {
-    return { text: `Something went wrong: ${(err as Error).message}` };
+    return { text: sellerFacing(err) };
   }
 }
 
@@ -1967,13 +2220,16 @@ async function runCommand(
         }
         if (onboarding.step === "name") return nameQuestion(kind, "empty");
         if (onboarding.step === "prices") return pricesQuestion(kind, null);
-        return { text: HELP };
+        return manualHome();
       }
       case "/help":
-        return { text: HELP };
+        return manualHome();
       case "/setup":
         return await handleRestartSetup(businessId);
       case "/add":
+        if (args.trim().length === 0) {
+          return await awaitArguments(businessId, "/add", "Type your prices 👇\n\nItem and price, one per line:\n  paneer 220\n  chai 15", "paneer 220");
+        }
         return await handleAdd(businessId, args);
       case "/prices":
       case "/list":
@@ -2005,11 +2261,12 @@ async function runCommand(
         const replied = incoming.repliedText?.trim();
         const orderText = args.trim().length > 0 ? args.trim() : replied ?? "";
         if (orderText.length === 0) {
-          return {
-            text:
-              "Send the order with it, or reply to the customer's message:\n" +
-              "  /zbill 2 paneer 3 samosa",
-          };
+          return await awaitArguments(
+            businessId,
+            "/zbill",
+            "Type the order 👇\n\nCustomer, then items — like:\n  Rahul 2 samosa 1 chai",
+            "Rahul 2 samosa 1 chai",
+          );
         }
         const anchorId =
           replied && args.trim().length === 0 && incoming.repliedMessageId
@@ -2033,8 +2290,12 @@ async function runCommand(
         if ("ask" in resolved) return { text: resolved.ask };
         return await handlePayment(businessId, resolved.billNo, resolved.amount, intent.customer);
       }
+      case "/customers":
+        return await customerPicker(businessId);
       case "/sales":
-        return await handleSales(businessId, args.length > 0 ? args : trimmed);
+        // Tapped from the menu it arrives bare: offer the periods as buttons
+        // rather than silently answering "today".
+        return args.length > 0 ? await handleSales(businessId, args) : salesPeriodPicker();
       case "/open":
         return await handleOpenBills(businessId);
       default: {
@@ -2046,10 +2307,10 @@ async function runCommand(
         if (near) {
           return { text: `I don't know ${command}. Did you mean /${near}?` };
         }
-        return { text: `I don't know ${command}.\n\n${HELP}` };
+        return manualHome(`I don't know ${escapeHtml(command)}.`);
       }
     }
   } catch (err) {
-    return { text: `Something went wrong: ${(err as Error).message}` };
+    return { text: sellerFacing(err) };
   }
 }

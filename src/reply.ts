@@ -49,6 +49,16 @@ export interface Reply {
   photos?: ReplyPhoto[];
   // A file to send, e.g. a rendered bill PDF.
   document?: ReplyDocument;
+  // Grey example text shown inside the seller's typing box, with the box
+  // opened as a reply. Tapping "/zbill" in Telegram's menu SENDS it at
+  // once; this is how the bot then asks for the rest. Ignored when the
+  // reply has buttons (Telegram allows one or the other).
+  inputPlaceholder?: string;
+  // A button under the typing box that shares the seller's own phone
+  // number through Telegram (registration). Its label.
+  requestContact?: string;
+  // Take that button away again once it has done its job.
+  removeKeyboard?: boolean;
 }
 
 export interface IncomingMessage {
