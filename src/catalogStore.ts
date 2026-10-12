@@ -207,6 +207,36 @@ export async function takePendingResolution(
   return rows[0]!;
 }
 
+// A free-text question about an order ("What quantity of pizza?") shares
+// the pending_resolutions row, marked by this prefix on `term`. Only the
+// seller's very next message can answer it, and only within 15 minutes.
+export const CLARIFY_PREFIX = "__clarify__:";
+// The question "what does this new item cost?" — its message is the name.
+export const PRICE_QUESTION = "price-for-new-item";
+const CLARIFY_TTL_MS = 15 * 60 * 1000;
+
+export async function setPendingClarification(
+  businessId: string,
+  message: string,
+  question: string,
+): Promise<void> {
+  await setPendingResolution(businessId, message, CLARIFY_PREFIX + question);
+}
+
+export async function takePendingClarification(
+  businessId: string,
+): Promise<{ message: string; question: string } | null> {
+  const filter = `business_id=eq.${businessId}&term=like.${encodeURIComponent(CLARIFY_PREFIX)}*`;
+  const rows = (await rest(`pending_resolutions?${filter}&select=message,term,created_at`)) as
+    (PendingResolution & { created_at: string })[];
+  if (rows.length === 0) return null;
+
+  await rest(`pending_resolutions?${filter}`, { method: "DELETE" });
+  const row = rows[0]!;
+  if (Date.now() - Date.parse(row.created_at) > CLARIFY_TTL_MS) return null;
+  return { message: row.message, question: row.term.slice(CLARIFY_PREFIX.length) };
+}
+
 export async function getProductById(
   businessId: string,
   productId: string,

@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage as IncomingMessage2, type ServerResponse } from "node:http";
 import { routeParseOrder } from "./router.js";
+import { joinGroupedNumbers } from "./groupedNumbers.js";
 import { handleIncoming } from "./messageHandler.js";
 import { calculateBill } from "./calculator.js";
 import { formatBill } from "./formatter.js";
@@ -52,7 +53,7 @@ async function handleOrder(req: IncomingMessage2, res: ServerResponse): Promise<
   // clarification-needed outcome, not a server error — 422.
   let parsed: Awaited<ReturnType<typeof routeParseOrder>>["parsed"];
   try {
-    ({ parsed } = await routeParseOrder(text));
+    ({ parsed } = await routeParseOrder(joinGroupedNumbers(text)));
   } catch (err) {
     sendJson(res, 422, { ok: false, error: (err as Error).message });
     return;

@@ -1,9 +1,12 @@
-import { routeParseOrder } from "./router.js";
+import { routeParseOrder, RoutingFailedError } from "./router.js";
+import { applyClarification } from "./clarification.js";
+import { joinGroupedNumbers } from "./groupedNumbers.js";
 import { calculateBill } from "./calculator.js";
 import { formatBill } from "./formatter.js";
 import {
   getOrCreateBusinessForChannel, loadCatalog, upsertProduct, deactivateProduct,
   renameProduct, addAlias, setPendingResolution, takePendingResolution, getProductById,
+  setPendingClarification, takePendingClarification, CLARIFY_PREFIX, PRICE_QUESTION,
   loadAliases, forgetAlias,
 } from "./catalogStore.js";
 import { suggestSpelling, findNearDuplicate } from "./spellingSuggest.js";
@@ -95,7 +98,7 @@ import { SAMPLE_BILL } from "./billSamples.js";
 // between them. Nothing here knows what Telegram is.
 
 async function handleAdd(businessId: string, args: string): Promise<Reply> {
-  const { entries, unreadable } = parsePriceList(args);
+  const { entries, unreadable } = parsePriceList(joinGroupedNumbers(args));
 
   if (entries.length === 0 && unreadable.length === 0) {
     return {
@@ -239,6 +242,7 @@ async function handleAdd(businessId: string, args: string): Promise<Reply> {
     // one thing worth saying is exactly that. Checking costs one lookup
     // against data already loaded.
     const index = buildCatalogIndex(before);
+    const needsPrice: string[] = [];
     for (const fragment of unreadable) {
       // A BARE NUMBER IS NOT A PRODUCT NAME. "3 thali 150" once left "150"
       // behind and the reply asked for the price of "150", offering to
@@ -269,6 +273,7 @@ async function handleAdd(businessId: string, args: string): Promise<Reply> {
       // Not in the list. If it looks like a known dish misspelled, offer
       // the spelling now, BEFORE it is saved wrong and prints on a bill.
       const spelling = suggestSpelling(fragment);
+      if (!spelling) needsPrice.push(fragment);
       parts.push(
         spelling
           ? `I don't have "${fragment}" yet \u2014 did you mean ${titleCase(spelling.suggested)}?\n\n` +
@@ -276,6 +281,15 @@ async function handleAdd(businessId: string, args: string): Promise<Reply> {
           : `I don't have "${fragment}" yet, and I need its price.\n\n` +
             `Send it as:  ${fragment} 100`,
       );
+    }
+    // Exactly one name waiting on a price: a bare "100" next is that price.
+    // With two or more, a lone number could belong to either, so no guess.
+    if (needsPrice.length === 1) {
+      try {
+        await setPendingClarification(businessId, needsPrice[0]!, PRICE_QUESTION);
+      } catch {
+        // Losing this only means the seller types "gold 100" in full.
+      }
     }
   }
 
@@ -838,6 +852,7 @@ async function handleOrder(
   onSlowWork?: () => Promise<void>,
 ): Promise<Reply> {
   await onSlowWork?.();
+  text = joinGroupedNumbers(text);
   const catalog = await loadCatalog(businessId);
 
   if (catalog.products.length === 0) {
@@ -998,6 +1013,13 @@ async function handleOrder(
             action: encodeMeant(c.id),
           })),
         };
+      }
+    }
+    if (err instanceof RoutingFailedError || err instanceof CatalogResolutionError) {
+      try {
+        await setPendingClarification(businessId, text, (err as Error).message);
+      } catch {
+        // Losing the follow-up only means the seller retypes the order.
       }
     }
     return { text: (err as Error).message };
@@ -1391,6 +1413,28 @@ export async function handleIncoming(incoming: IncomingMessage): Promise<Reply> 
     }
     if (answered) return await handleAction(incoming, answered.action);
 
+    // A short reply right after an order question ("44") answers it: the
+    // answer is folded into the original order (see clarification.ts) and
+    // it is re-run. Anything longer is a new message and the question is
+    // dropped.
+    let clarified: { message: string; question: string } | null = null;
+    try {
+      clarified = await takePendingClarification(businessId);
+    } catch {
+      // Same rule as above: a failed lookup never blocks the message.
+    }
+    if (clarified?.question === PRICE_QUESTION) {
+      const price = trimmed.match(/^(?:₹|rs\.?)?\s*(\d+(?:\.\d{1,2})?)$/i)?.[1];
+      if (price) return await handleAdd(businessId, `${clarified.message} ${price}`);
+    } else if (clarified && trimmed.split(/\s+/).length <= 3) {
+      return await handleOrder(
+        businessId,
+        applyClarification(clarified.message, clarified.question, trimmed),
+        sourceMessageId,
+        incoming.onSlowWork,
+      );
+    }
+
     try {
       const onboarding = await loadOnboarding(businessId);
       if (onboarding.step !== "done") {
@@ -1752,7 +1796,7 @@ export async function handleAction(incoming: IncomingMessage, action: string): P
       const pending = await takePendingResolution(businessId);
       const product = await getProductById(businessId, meantId);
       if (!product) return { text: "That item isn't in your price list any more." };
-      if (!pending) {
+      if (!pending || pending.term.startsWith(CLARIFY_PREFIX)) {
         return { text: "That question has already been answered. Send the order again." };
       }
 
@@ -1873,6 +1917,9 @@ async function runCommand(
         return await handleLearned(businessId);
       case "/forget":
         return await handleForget(businessId, args);
+      case "/bill":
+        if (args.trim().length === 0) return await handleShowBill(businessId);
+      // falls through: "/bill pizza 500" is an order, never silently drop it
       case "/zbill": {
         const replied = incoming.repliedText?.trim();
         const orderText = args.trim().length > 0 ? args.trim() : replied ?? "";
@@ -1895,8 +1942,6 @@ async function runCommand(
       case "/minus":
       case "/removeitem":
         return await handleRemoveItem(businessId, args);
-      case "/bill":
-        return await handleShowBill(businessId);
       case "/done":
         return await handleDone(businessId);
       case "/paid":
