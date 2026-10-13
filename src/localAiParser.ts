@@ -16,8 +16,15 @@ interface OllamaChatResponse {
   message: { content: string };
 }
 
+// A hung or overloaded Ollama used to make an order wait indefinitely.
+// Past this, the order is handed to the cloud model instead.
+const LOCAL_TIMEOUT_MS = Number(process.env["LOCAL_MODEL_TIMEOUT_MS"] ?? 20000);
+
 async function callOllama(text: string): Promise<Record<string, unknown>> {
-  const response = await fetch(OLLAMA_URL, {
+  let response: Response;
+  try {
+    response = await fetch(OLLAMA_URL, {
+      signal: AbortSignal.timeout(LOCAL_TIMEOUT_MS),
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -35,6 +42,12 @@ async function callOllama(text: string): Promise<Record<string, unknown>> {
       options: { temperature: 0, seed: 42 },
     }),
   });
+  } catch (err) {
+    if ((err as Error).name === "TimeoutError" || (err as Error).name === "AbortError") {
+      throw new Error(`Local model timed out after ${LOCAL_TIMEOUT_MS / 1000}s.`);
+    }
+    throw err;
+  }
 
   if (!response.ok) {
     throw new Error(

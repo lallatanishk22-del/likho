@@ -74,12 +74,12 @@ import { parsePriceList, readsAsPriceList } from "./priceList.js";
 import { formatBusinessDateTime, parseDateRange, stripDateExpressions } from "./businessDay.js";
 import {
   loadBusinessProfile, setBillTemplate, setBusinessField, isEditableField, EDITABLE_FIELDS,
-  loadOnboarding, setOnboardingStep, setBusinessKind, type OnboardingState,
+  loadOnboarding, setOnboardingStep, setBusinessKind, saveOwnerName, advanceSetup, type OnboardingState,
 } from "./businessProfile.js";
 import {
   kindById, decodeKind, readBusinessKind, readShopName, looksLikeAnOrder,
   isSkip, welcomeQuestion, nameQuestion, pricesQuestion, pricesRetry, finishedMessage,
-  orderBeforePricesQuestion,
+  orderBeforePricesQuestion, ownerQuestion, readOwnerName, phoneQuestion, readPhone, areaQuestion, readArea,
   skippedMessage, SKIP_ACTION, FORMAT_ACTION, SHOP_ACTION, type BusinessKind,
 } from "./onboarding.js";
 import {
@@ -493,8 +493,9 @@ async function handleBusinessInfo(businessId: string, args: string): Promise<Rep
 
 async function applyKind(businessId: string, kind: BusinessKind): Promise<Reply> {
   await setBusinessKind(businessId, kind.id, kind.template);
-  await setOnboardingStep(businessId, "name");
-  return nameQuestion(kind);
+  // Owner's name next — or the shop name, before the onboarding migration.
+  const step = await advanceSetup(businessId, "owner", "name");
+  return step === "owner" ? ownerQuestion(kind) : nameQuestion(kind);
 }
 
 async function handleRestartSetup(businessId: string): Promise<Reply> {
@@ -528,9 +529,30 @@ async function handleSkipSetup(businessId: string): Promise<Reply> {
   const state = await loadOnboarding(businessId);
   const kind = kindById(state.kindId);
   if (state.step === "kind") return welcomeQuestion(false);
+  if (state.step === "owner") return ownerQuestion(kind, "invalid");
   if (state.step === "name") return nameQuestion(kind, "required");
+  if (state.step === "phone") return await goToArea(businessId);
+  if (state.step === "area") return await goToPrices(businessId, kind, null);
   await setOnboardingStep(businessId, "done");
   return { text: skippedMessage(state.step) };
+}
+
+// After phone (answered or skipped): the area question.
+async function goToArea(businessId: string): Promise<Reply> {
+  await setOnboardingStep(businessId, "area");
+  return areaQuestion();
+}
+
+// After area: prices — or straight to done when prices already exist.
+async function goToPrices(businessId: string, kind: BusinessKind, saved: string | null): Promise<Reply> {
+  const state = await loadOnboarding(businessId);
+  const priced = await loadCatalog(businessId);
+  if (priced.products.length > 0) {
+    await setOnboardingStep(businessId, "done");
+    return finishedMessage(kind, state.name, priced.products.map((p) => p.name));
+  }
+  await setOnboardingStep(businessId, "prices");
+  return pricesQuestion(kind, saved);
 }
 
 // Runs INSTEAD of the normal intent layer while setup is unfinished. A new
@@ -558,7 +580,10 @@ async function handleOnboarding(
   // just means "something else"; at the name question it is re-asked.
   if (isSkip(text)) {
     if (state.step === "kind") return await applyKind(businessId, kindById("other"));
+    if (state.step === "owner") return ownerQuestion(kind, "invalid");
     if (state.step === "name") return nameQuestion(kind, "required");
+    if (state.step === "phone") return await goToArea(businessId);
+    if (state.step === "area") return await goToPrices(businessId, kind, null);
     await setOnboardingStep(businessId, "done");
     return { text: skippedMessage(state.step) };
   }
@@ -596,6 +621,41 @@ async function handleOnboarding(
       return welcomeQuestion(!opening);
     }
 
+    case "owner": {
+      if (await isOrderForThisShop(businessId, text)) {
+        const billed = await handleOrder(businessId, text, sourceMessageId, incoming.onSlowWork);
+        return { ...billed, follow: [...(billed.follow ?? []), ownerQuestion(kind, "invalid")] };
+      }
+      const owner = readOwnerName(text);
+      if (!owner) return ownerQuestion(kind, "invalid");
+      await saveOwnerName(businessId, owner);
+      await setOnboardingStep(businessId, "name");
+      return { text: `\u2713 ${owner}\n\n${nameQuestion(kind, "empty").text}` };
+    }
+
+    case "phone": {
+      if (await isOrderForThisShop(businessId, text)) {
+        const billed = await handleOrder(businessId, text, sourceMessageId, incoming.onSlowWork);
+        return { ...billed, follow: [...(billed.follow ?? []), phoneQuestion(state.name)] };
+      }
+      const phone = readPhone(text);
+      if (!phone) return phoneQuestion(state.name, "invalid");
+      await setBusinessField(businessId, "phone", phone);
+      const next = await goToArea(businessId);
+      return { ...next, text: `\u2713 ${phone}\n\n${next.text}` };
+    }
+
+    case "area": {
+      if (await isOrderForThisShop(businessId, text)) {
+        const billed = await handleOrder(businessId, text, sourceMessageId, incoming.onSlowWork);
+        return { ...billed, follow: [...(billed.follow ?? []), areaQuestion()] };
+      }
+      const area = readArea(text);
+      if (!area) return areaQuestion("invalid");
+      await setBusinessField(businessId, "address", area);
+      return await goToPrices(businessId, kind, area);
+    }
+
     case "name": {
       // THE NAME IS REQUIRED, BUT NEVER IN THE WAY OF A BILL. A seller who
       // has prices and sends an order gets the bill, then the question
@@ -608,6 +668,8 @@ async function handleOnboarding(
       const read = readShopName(text);
       if ("problem" in read) return nameQuestion(kind, read.problem);
       await setBusinessField(businessId, "name", read.name);
+      // Shop phone next — skipped entirely before the onboarding migration.
+      if ((await advanceSetup(businessId, "phone", "name")) === "phone") return phoneQuestion(read.name);
       // Prices already in (added with /add first, or a seller redoing setup):
       // nothing left to ask.
       const priced = await loadCatalog(businessId);
@@ -2172,7 +2234,10 @@ async function runCommand(
         if (onboarding.step === "kind") {
           return await handleOnboarding(businessId, onboarding, incoming, "/start", sourceMessageId);
         }
+        if (onboarding.step === "owner") return ownerQuestion(kind, "invalid");
         if (onboarding.step === "name") return nameQuestion(kind, "empty");
+        if (onboarding.step === "phone") return phoneQuestion(onboarding.name);
+        if (onboarding.step === "area") return areaQuestion();
         if (onboarding.step === "prices") return pricesQuestion(kind, null);
         return manualHome();
       }

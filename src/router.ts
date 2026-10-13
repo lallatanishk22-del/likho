@@ -6,6 +6,7 @@ import type { ParsedOrder } from "./structuredOrder.js";
 import type { ParseOptions, ProviderName } from "./aiProvider.js";
 import { TrustRejectedError, type TrustSignals } from "./trustLayer.js";
 import { CatalogResolutionError } from "./catalog.js";
+import { ModelHealth, isHealthFailure, FAILURES_TO_PAUSE } from "./modelHealth.js";
 
 // The cloud provider can fail for two very different reasons: it genuinely
 // judged the order unclear, or it was never reachable (no key, network
@@ -75,6 +76,9 @@ export class RoutingFailedError extends Error {
 // hard"; it's "did local prove it could safely interpret this one." The
 // cloud result goes through the identical two-stage check — no double
 // standard, no repairing local's output.
+// One per running bot: shared by every order, so the pause applies to all.
+const localHealth = new ModelHealth();
+
 export async function routeParseOrder(
   message: string,
   options?: ParseOptions,
@@ -97,8 +101,14 @@ export async function routeParseOrder(
   };
 
   const localStart = Date.now();
-  try {
+  // Local failed 3 times in a row: skip it for a while, straight to cloud.
+  if (localHealth.isPaused()) {
+    log.localLatencyMs = 0;
+    log.escalated = true;
+    log.escalationReason = `local model paused after ${FAILURES_TO_PAUSE} failures in a row`;
+  } else try {
     const parsed = await localProvider.parseOrder(message, options);
+    localHealth.recordSuccess();
     log.localLatencyMs = Date.now() - localStart;
     log.totalLatencyMs = log.localLatencyMs;
     log.outcome = "valid";
@@ -107,6 +117,12 @@ export async function routeParseOrder(
     return { parsed, log };
   } catch (localErr) {
     log.localLatencyMs = Date.now() - localStart;
+    if (isHealthFailure(localErr) && localHealth.recordFailure()) {
+      console.error(
+        `[router] local model failed ${FAILURES_TO_PAUSE} times in a row — using the cloud model only ` +
+          `until ${new Date(localHealth.pausedUntilTime()).toLocaleTimeString()}`,
+      );
+    }
     // A catalog miss is deterministic — the cloud model reads the same
     // price store and would fail identically. Short-circuit so the seller
     // gets the actual "I don't have a price for X" message instead of a

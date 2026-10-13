@@ -215,3 +215,34 @@ test("a real item named 'setup' is still billable", () => {
   assert.equal(classifyIntent("Ravi 2 setup fee").name, "order");
   assert.equal(classifyIntent("setup 500").name, "order");
 });
+
+test("owner name: the name, not the sentence around it", async () => {
+  const { readOwnerName } = await import("../src/onboarding.js");
+  assert.equal(readOwnerName("Tanishk Lalla"), "Tanishk Lalla");
+  assert.equal(readOwnerName("my name is asha"), "Asha");
+  assert.equal(readOwnerName("main Ravi hoon"), "Ravi");
+  assert.equal(readOwnerName("Rahul 2 samosa"), null, "an order is not a name");
+  assert.equal(readOwnerName("x"), null);
+});
+
+test("shop phone: 10 digits, with or without +91 / 0 / spaces", async () => {
+  const { readPhone } = await import("../src/onboarding.js");
+  for (const t of ["9820041122", "+91 98200 41122", "919820041122", "098200-41122"]) {
+    assert.equal(readPhone(t), "98200 41122", t);
+  }
+  for (const t of ["12345", "Rahul 2 samosa", "98200411223344"]) assert.equal(readPhone(t), null, t);
+});
+
+test("area: a place, not an order", async () => {
+  const { readArea } = await import("../src/onboarding.js");
+  assert.equal(readArea("Andheri, Mumbai"), "Andheri, Mumbai");
+  assert.equal(readArea("Sector 15 Vashi"), "Sector 15 Vashi");
+  assert.equal(readArea("Rahul 2 samosa 3 chai"), null);
+});
+
+test("phone and area can be skipped; owner name cannot", async () => {
+  const { phoneQuestion, areaQuestion, ownerQuestion } = await import("../src/onboarding.js");
+  assert.ok(phoneQuestion("Shop").actions?.some((a) => a.action === SKIP_ACTION));
+  assert.ok(areaQuestion().actions?.some((a) => a.action === SKIP_ACTION));
+  assert.ok(!ownerQuestion(BUSINESS_KINDS[0]!).actions?.some((a) => a.action === SKIP_ACTION));
+});

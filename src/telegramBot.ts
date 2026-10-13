@@ -1,6 +1,7 @@
 import { handleIncoming, handleAction, type Reply, type IncomingMessage } from "./messageHandler.js";
 import { promises as fs, readFileSync, writeFileSync } from "node:fs";
 import { isRegistered, registerContact, registrationPrompt } from "./registration.js";
+import { isRepeatedBareCommand } from "./repeatCommand.js";
 import path from "node:path";
 
 // Telegram transport only: receive updates, hand them to the shared
@@ -79,6 +80,25 @@ function toInlineKeyboard(reply: Reply): unknown {
 
 // multipart upload, hand-rolled: Telegram wants a file, and adding a
 // form-data dependency for two endpoints is not worth it.
+// A DROPPED CONNECTION IS RETRIED, NOT A LOST REPLY. A "/sales" report was
+// computed and then lost to one ECONNRESET while sending — and the
+// "something went wrong" fallback went down the same broken connection, so
+// the seller saw nothing at all. Network failures (no HTTP response) are
+// retried up to 3 times; an HTTP error from Telegram is a real answer and is
+// not. A reset after Telegram already accepted could, rarely, show a reply
+// twice — better than the seller getting no reply.
+async function fetchWithRetry(url: string, init: RequestInit, attempts = 3): Promise<Response> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fetch(url, init);
+    } catch (err) {
+      if (attempt >= attempts) throw err;
+      console.error(`[telegram] network error, retry ${attempt}/${attempts - 1}:`, (err as Error).message);
+      await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
+    }
+  }
+}
+
 async function sendFile(
   method: "sendPhoto" | "sendDocument" | "sendMediaGroup",
   chatId: number,
@@ -94,7 +114,7 @@ async function sendFile(
     form.append(file.field, new Blob([bytes]), path.basename(file.filePath));
   }
 
-  const response = await fetch(`${API_BASE}/${method}`, { method: "POST", body: form });
+  const response = await fetchWithRetry(`${API_BASE}/${method}`, { method: "POST", body: form });
   if (!response.ok) {
     throw new Error(`${method} failed (${response.status}): ${await response.text()}`);
   }
@@ -150,7 +170,7 @@ async function sendReply(chatId: number, reply: Reply): Promise<void> {
 
   if (reply.text.trim().length === 0 && !reply.actions?.length) return;
 
-  const response = await fetch(`${API_BASE}/sendMessage`, {
+  const response = await fetchWithRetry(`${API_BASE}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -182,6 +202,27 @@ async function sendReply(chatId: number, reply: Reply): Promise<void> {
 
 async function sendMessage(chatId: number, text: string): Promise<void> {
   await sendReply(chatId, { text });
+}
+
+// THE SAME BARE COMMAND TWICE IN A FEW SECONDS IS ONE TAP.
+//
+// Telegram clients can send "/start" twice for one tap on Start (seen in
+// the logs: two /start messages, two identical welcomes). A bare command
+// repeated within seconds is never meant twice, so the repeat is deleted
+// from the chat and not answered. Only bare commands: a repeated ORDER is
+// already guarded by the one-message-one-bill check, and must still be
+// visible.
+const lastBareCommand = new Map<number, { text: string; at: number }>();
+
+
+async function deleteMessage(chatId: number, messageId: number): Promise<void> {
+  if (!API_BASE) return;
+  // Best effort: if Telegram refuses, the duplicate simply stays visible.
+  await fetch(`${API_BASE}/deleteMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
+  }).catch(() => undefined);
 }
 
 // Telegram shows a loading spinner on the button until this is called.
@@ -316,6 +357,14 @@ async function pollLoop(): Promise<void> {
         if (chat && chat.type && chat.type !== "private") {
           if (callback) await answerCallback(callback.id);
           else if (message) await sendMessage(chat.id, "Please use me in a private chat — open @zbillingbot and tap Start.");
+          continue;
+        }
+
+        // A bare command sent twice for one tap: delete the repeat, answer once.
+        // Checked before registration so the welcome is never shown twice.
+        if (message && text && isRepeatedBareCommand(lastBareCommand, message.chat.id, text, Date.now())) {
+          console.log(`[telegram] <- chat=${message.chat.id} repeated ${JSON.stringify(text)} within 5s — deleted, not answered`);
+          if (message.message_id != null) await deleteMessage(message.chat.id, message.message_id);
           continue;
         }
 

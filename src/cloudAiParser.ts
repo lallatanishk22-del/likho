@@ -24,13 +24,33 @@ interface FireworksChatResponse {
   choices: { message: { content: string } }[];
 }
 
+// The cloud model is the fallback, so it gets the persistence local does
+// not: up to 3 attempts on a dropped connection, a timeout, a server error
+// (5xx) or a rate limit (429). A rejected key (401) or a missing model (404)
+// will not fix itself and is reported at once.
+const CLOUD_ATTEMPTS = 3;
+const CLOUD_TIMEOUT_MS = 30000;
+
+async function fetchCloudWithRetry(url: string, init: RequestInit): Promise<Response> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const response = await fetch(url, { ...init, signal: AbortSignal.timeout(CLOUD_TIMEOUT_MS) });
+      const retryable = response.status === 429 || response.status >= 500;
+      if (!retryable || attempt >= CLOUD_ATTEMPTS) return response;
+    } catch (err) {
+      if (attempt >= CLOUD_ATTEMPTS) throw err;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 700 * attempt));
+  }
+}
+
 export async function parseOrderWithCloudAI(text: string, options?: ParseOptions): Promise<ParsedOrder> {
   const apiKey = process.env["FIREWORKS_API_KEY"];
   if (!apiKey) {
     throw new Error("FIREWORKS_API_KEY is not set — cannot reach the cloud fallback model.");
   }
 
-  const response = await fetch(FIREWORKS_URL, {
+  const response = await fetchCloudWithRetry(FIREWORKS_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

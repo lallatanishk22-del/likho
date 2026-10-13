@@ -26,7 +26,11 @@
 import { parsePriceList } from "./priceList.js";
 import type { TemplateId } from "./billData.js";
 
-export const ONBOARDING_STEPS = ["kind", "name", "prices", "done"] as const;
+// kind -> owner -> name -> phone -> area -> prices. "owner", "phone" and
+// "area" need supabase/migrations/20261013_onboarding_details.sql; until it
+// has run, the database refuses those steps and setup falls back to
+// kind -> name -> prices (see advanceSetup in messageHandler.ts).
+export const ONBOARDING_STEPS = ["kind", "owner", "name", "phone", "area", "prices", "done"] as const;
 export type OnboardingStep = (typeof ONBOARDING_STEPS)[number];
 
 export function asOnboardingStep(value: unknown): OnboardingStep {
@@ -212,6 +216,61 @@ export function welcomeQuestion(retry: boolean): Question {
       ...BUSINESS_KINDS.map((k) => ({ label: k.label, action: encodeKind(k.id) })),
     ],
   };
+}
+
+// --- Owner, phone, area -------------------------------------------------
+
+export function ownerQuestion(kind: BusinessKind, problem?: "invalid"): Question {
+  const preface = problem ? "Just your name, please.\n\n" : `\u2713 ${kind.label.replace(/^\S+\s/, "")}\n\n`;
+  return { text: `${preface}What's your name?` };
+}
+
+// "my name is Tanishk Lalla", "main Asha hoon", "Asha" -> a name; anything
+// with digits or more than four words is not.
+export function readOwnerName(raw: string): string | null {
+  const text = raw
+    .trim()
+    .replace(/^(my name is|i am|i'm|this is|mera naam|main|mai)\s+/i, "")
+    .replace(/\s+(hai|hoon|hu|here)$/i, "")
+    .replace(/[.!]+$/, "")
+    .trim();
+  if (text.length < 2 || text.length > 40 || /\d/.test(text)) return null;
+  if (text.split(/\s+/).length > 4) return null;
+  if (!/^[\p{L}][\p{L}\s.'’-]*$/u.test(text)) return null;
+  return text.replace(/\b\p{Ll}/gu, (c) => c.toUpperCase());
+}
+
+export function phoneQuestion(shopName: string, problem?: "invalid"): Question {
+  return {
+    text: problem
+      ? "That doesn't look like a phone number. Send 10 digits, like 98200 41122."
+      : `\u2713 ${shopName}\n\nShop phone number?\nIt goes on your bills.`,
+    actions: [skipAction("Skip")],
+  };
+}
+
+// Indian mobile or landline: 10 digits, optionally with +91 / 91 / 0 in
+// front, spaces or dashes allowed. Returned as typed digits, grouped 5+5.
+export function readPhone(raw: string): string | null {
+  const digits = raw.replace(/[\s\-()]/g, "").replace(/^\+?91(?=\d{10}$)/, "").replace(/^0(?=\d{10}$)/, "");
+  if (!/^\d{10}$/.test(digits)) return null;
+  return `${digits.slice(0, 5)} ${digits.slice(5)}`;
+}
+
+export function areaQuestion(problem?: "invalid"): Question {
+  return {
+    text: problem ? "Just the area and city, like:  Andheri, Mumbai" : "City or area?\nLike:  Andheri, Mumbai",
+    actions: [skipAction("Skip")],
+  };
+}
+
+export function readArea(raw: string): string | null {
+  const text = raw.trim().replace(/\s+/g, " ");
+  if (text.length < 2 || text.length > 60) return null;
+  // An order typed here is not an address — but "Sector 15 Vashi" is, so
+  // only two or more quantity-item pairs ("2 samosa 3 chai") count as one.
+  if ((text.match(/\d+\s+\p{L}+/gu) ?? []).length >= 2) return null;
+  return text;
 }
 
 export function nameQuestion(kind: BusinessKind, problem?: NameProblem): Question {

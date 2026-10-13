@@ -140,3 +140,37 @@ export async function setBusinessKind(
     body: JSON.stringify({ business_kind: kindId, bill_template: template }),
   });
 }
+
+// The seller's own name. The column arrives with
+// supabase/migrations/20261013_onboarding_details.sql; before that the save
+// is skipped (and logged) rather than failing setup.
+export async function saveOwnerName(businessId: string, ownerName: string): Promise<boolean> {
+  try {
+    await rest(`businesses?id=eq.${businessId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ owner_name: ownerName }),
+    });
+    return true;
+  } catch (err) {
+    console.error("[onboarding] owner name not saved (migration not run?):", (err as Error).message);
+    return false;
+  }
+}
+
+// Moves setup to `preferred`, or to `fallback` when the database does not
+// know that step yet (the onboarding migration hasn't run). Returns the
+// step actually set, so the caller asks the matching question.
+export async function advanceSetup(
+  businessId: string,
+  preferred: OnboardingStep,
+  fallback: OnboardingStep,
+): Promise<OnboardingStep> {
+  try {
+    await setOnboardingStep(businessId, preferred);
+    return preferred;
+  } catch (err) {
+    if (!/onboarding_step_check|23514/.test((err as Error).message)) throw err;
+    await setOnboardingStep(businessId, fallback);
+    return fallback;
+  }
+}
