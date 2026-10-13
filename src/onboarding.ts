@@ -200,63 +200,50 @@ function skipAction(label: string): { label: string; action: string } {
   return { label, action: SKIP_ACTION };
 }
 
-// One tap to a real bill, for anyone trying Likho before they have typed a
-// price list. Always called a SAMPLE: these are not the seller's prices.
-export const SAMPLE_ACTION = "onb:sample";
-export const SAMPLE_MENU =
-  "paneer tikka 180\nbutter naan 40\ndal fry 90\nthali 150\nsamosa 20\nchai 15\nlassi 40\ncoke 40";
-const sampleAction = { label: "\u{26a1} Try a sample menu", action: SAMPLE_ACTION };
-
 export function welcomeQuestion(retry: boolean): Question {
-  const list = BUSINESS_KINDS.map((k, i) => `  ${i + 1}. ${k.label}`).join("\n");
-  const opening = retry
-    ? "Tap one of these, or type the number:"
-    : "\u{1f44b} I'm Likho. You type the order, I make the bill.\n\n" +
-      "Three quick questions and you're set.\n\nFirst — what do you sell?";
+  // The buttons ARE the list; typing "2" or "restaurant" still works.
+  const text = retry
+    ? "Tap one:"
+    : "\u{1f44b} Welcome to Likho.\nType an order, get a bill.\n\nWhat do you sell?";
 
   return {
-    text: `${opening}\n\n${list}`,
+    text,
     actions: [
       ...BUSINESS_KINDS.map((k) => ({ label: k.label, action: encodeKind(k.id) })),
-      sampleAction,
     ],
   };
 }
 
 export function nameQuestion(kind: BusinessKind, problem?: NameProblem): Question {
-  const ask =
-    "What's your business called?\n\nThis prints at the top of every bill your customers see.";
+  const ask = "What's your shop called?\nIt goes on every bill.";
 
   const preface =
     problem === "looks_like_an_order"
-      ? "That looks like an order, not a name — and it would end up on every bill.\n\n"
+      ? "That looks like an order, not a name.\n\n"
       : problem === "too_long"
-        ? `That's longer than ${MAX_NAME_LENGTH} characters. Something shorter?\n\n`
+        ? `Too long — keep it under ${MAX_NAME_LENGTH} characters.\n\n`
         : problem === "required"
-          ? "Your shop name is needed — it goes at the top of every bill.\n\n"
+          ? "A shop name is needed.\n\n"
           : problem === "empty"
             ? ""
-          : `Good — ${kind.label.replace(/^\S+\s/, "")}. Your bills will use a style made for that.\n\n`;
+          : `\u2713 ${kind.label.replace(/^\S+\s/, "")}\n\n`;
 
   const escape =
     problem === "looks_like_an_order"
-      ? '\n\nIf that really is the name, send:  shop name <your name>'
+      ? "\n\nIf it is the name, send:  shop name <name>"
       : "";
 
   return { text: `${preface}${ask}${escape}` };
 }
 
 export function pricesQuestion(kind: BusinessKind, shopName: string | null): Question {
-  const preface = shopName ? `Saved — ${shopName}.\n\n` : "";
+  const preface = shopName ? `\u2713 ${shopName}\n\n` : "";
   return {
     text:
-      `${preface}Last one, and it's the one that matters.\n\n` +
-      `What do you sell, and for how much? Type them however you like — ` +
-      `one per line, or all on one:\n\n` +
-      kind.examples.map((e) => `  ${e}`).join("\n") +
-      `\n\nI'll remember these and price every future order from them. ` +
-      `You can add or change items any time.`,
-    actions: [sampleAction, skipAction("Skip — I'll add them later")],
+      `${preface}Now your prices, one per line:\n\n` +
+      kind.examples.slice(0, 3).map((e) => `  ${e}`).join("\n") +
+      `\n\nChange them any time.`,
+    actions: [skipAction("Skip for now")],
   };
 }
 
@@ -267,10 +254,7 @@ export function pricesQuestion(kind: BusinessKind, shopName: string | null): Que
 export function orderBeforePricesQuestion(kind: BusinessKind): Question {
   const q = pricesQuestion(kind, null);
   return {
-    text:
-      "That's exactly how to talk to me \u2014 but I don't know your prices " +
-      "yet, so I'd be guessing at the money, and I won't do that.\n\n" +
-      q.text.replace(/^Last one, and it's the one that matters\.\n\n/, ""),
+    text: `I need your prices first, so the bill is right.\n\n${q.text}`,
     actions: q.actions,
   };
 }
@@ -279,14 +263,7 @@ export function orderBeforePricesQuestion(kind: BusinessKind): Question {
 // scolding: the seller has already been told which fragment failed by the
 // price-list parser, so this only shows the shape that works.
 export function pricesRetry(kind: BusinessKind): string {
-  return (
-    `Send each item with its price, like:\n\n` +
-    kind.examples
-      .slice(0, 2)
-      .map((e) => `  ${e}`)
-      .join("\n") +
-    `\n\nOr say *skip* and add them later.`
-  );
+  return `Send item and price, like:\n  ${kind.examples[0]}\n\nOr say skip.`;
 }
 
 export const FORMAT_ACTION = "onb:format";
@@ -314,11 +291,7 @@ export function finishedMessage(
         : kind.sampleOrder;
 
   return {
-    text:
-      `✅ You're set up.\n\n${summary}\n\n` +
-      `Now just talk to me. Send an order the way you'd say it:\n\n` +
-      `  ${sample}\n\n` +
-      `You can also forward a customer's message straight to me.`,
+    text: `\u2705 All set \u2014 ${summary}\n\nSend an order like:\n  ${sample}`,
     actions: [
       { label: "\u{1f9fe} See bill styles", action: FORMAT_ACTION },
       { label: "\u{1f3ea} Add phone & UPI", action: SHOP_ACTION },
@@ -330,12 +303,7 @@ export function finishedMessage(
 // a seller who skips prices WILL hit "I don't have a price for that" and
 // needs to already know why.
 export function skippedMessage(step: OnboardingStep): string {
-  const missing =
-    step === "prices"
-      ? "I don't have your prices yet, so I can only bill orders that state " +
-        "the price:\n  Ravi 2 paneer 220\n\nSend your rates whenever you like:\n  paneer 220\n  lassi 80"
-      : "You can set your shop name and prices whenever you like:\n" +
-        "  paneer 220\n  shop name Sharma Tiffin";
-
-  return `No problem — setup's done.\n\n${missing}\n\nSay *setup* to go through it again.`;
+  return step === "prices"
+    ? "\u2705 Done. Add prices any time:\n  /add paneer 220"
+    : "\u2705 Done. Set your shop name any time:\n  shop name Sharma Tiffin";
 }

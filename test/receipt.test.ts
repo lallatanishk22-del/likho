@@ -45,3 +45,13 @@ test("no customer, no discount: still a complete receipt", () => {
   assert.equal(lines[0]!.trim(), "Bill #1041");
   assert.ok(lines.some((l) => l.startsWith("TOTAL") && l.endsWith("₹432")));
 });
+
+test("a typical bill fits a phone with large text (24 characters)", () => {
+  const lines = layoutReceipt({
+    ...base,
+    items: [{ name: "Paneer Butter Masala", qty: 12, amount: "₹3,360" }],
+    summary: [{ left: "Subtotal", right: "₹3,360" }, { left: "Discount 15%", right: "−₹504" }],
+    total: "₹2,856",
+  });
+  for (const line of lines) assert.ok(line.length <= 24, `too wide: "${line}"`);
+});

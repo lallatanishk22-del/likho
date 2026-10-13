@@ -48,8 +48,8 @@ export interface ParsedCommand {
 // whitespace. Everything up to the next command is its arguments:
 //
 //   /add samosa 20\nchai 15         -> one /add, two lines of arguments
-//   /zbill 2 chai\n/plus 1 mithai   -> two commands
-//   /zbill 2 chai /plus 1 mithai    -> two commands (same line)
+//   /bill 2 chai\n/plus 1 mithai    -> two commands
+//   /bill 2 chai /plus 1 mithai     -> two commands (same line)
 //
 // Splitting deterministically here means the model never has to guess
 // whether "/add mithai 10" was an instruction or part of an order.
@@ -92,8 +92,13 @@ export function splitCommands(text: string): ParsedCommand[] {
     const exact = byLength.find((c) => lower === c);
     const typo = exact ? null : suggestFromList(lower.slice(1), commandNames);
     const command = exact ?? (typo ? undefined : byLength.find((c) => lower.startsWith(c)));
+    // "/bill@zbillingbot chai 1" — Telegram appends the bot's username when
+    // a command is picked from the menu in some clients. It is part of the
+    // command, never an argument; left in, "@zbillingbot" reached the order.
+    const mention = trimmed.slice(index + token.length).match(/^@[A-Za-z0-9_]+/);
+    const end = index + token.length + (mention ? mention[0].length : 0);
     if (command) {
-      hits.push({ index, command, glued: token.slice(command.length), end: index + token.length });
+      hits.push({ index, command, glued: token.slice(command.length), end });
     } else if (index === 0 || typo) {
       // AN UNKNOWN COMMAND IS A TYPO, NOT AN ORDER.
       //
@@ -101,7 +106,7 @@ export function splitCommands(text: string): ParsedCommand[] {
       // seller reaching for a command. A stray slash later in a sentence
       // is left to the normal language path rather than refusing an order
       // over punctuation.
-      hits.push({ index, command: lower, glued: "", end: index + token.length });
+      hits.push({ index, command: lower, glued: "", end });
     }
   }
 

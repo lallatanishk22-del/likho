@@ -122,3 +122,27 @@ test("a far-off remainder is a real argument", () => {
   assert.equal(one("/addbiryani 220").command, "/add");
   assert.equal(one("/pricesnow").command, "/prices");
 });
+
+test("/bill is a billing command with its order as arguments", () => {
+  assert.deepEqual(splitCommands("/bill chai 1 samosa 2 kachori 3"), [
+    { command: "/bill", args: "chai 1 samosa 2 kachori 3" },
+  ]);
+  assert.deepEqual(splitCommands("/bill Tanishk chai 1 samosa 2 kachori 3 discount 15%"), [
+    { command: "/bill", args: "Tanishk chai 1 samosa 2 kachori 3 discount 15%" },
+  ]);
+  assert.deepEqual(splitCommands("/BILL 2 chai"), [{ command: "/bill", args: "2 chai" }]);
+});
+
+test("the bot's @username after a command never reaches the order", () => {
+  assert.deepEqual(splitCommands("/bill@zbillingbot chai 1"), [{ command: "/bill", args: "chai 1" }]);
+  assert.deepEqual(splitCommands("/zbill@zbillingbot 2 chai"), [{ command: "/zbill", args: "2 chai" }]);
+  assert.deepEqual(splitCommands("/bill@zbillingbot"), [{ command: "/bill", args: "" }]);
+});
+
+test("/zbill still splits exactly like /bill", () => {
+  const a = splitCommands("Rahul /bill 2 chai /plus 1 samosa");
+  const b = splitCommands("Rahul /zbill 2 chai /plus 1 samosa");
+  assert.deepEqual(a.map((c) => c.args), b.map((c) => c.args));
+  assert.equal(a[0]!.command, "/bill");
+  assert.equal(b[0]!.command, "/zbill");
+});

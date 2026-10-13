@@ -50,7 +50,7 @@ export interface Reply {
   // A file to send, e.g. a rendered bill PDF.
   document?: ReplyDocument;
   // Grey example text shown inside the seller's typing box, with the box
-  // opened as a reply. Tapping "/zbill" in Telegram's menu SENDS it at
+  // opened as a reply. Tapping "/bill" in Telegram's menu SENDS it at
   // once; this is how the bot then asks for the rest. Ignored when the
   // reply has buttons (Telegram allows one or the other).
   inputPlaceholder?: string;

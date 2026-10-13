@@ -37,7 +37,7 @@ import { parseDiscount } from "./discount.js";
 import { parseOrderExtras } from "./orderExtras.js";
 import { expandHindiNumerals, hasNumeralWord } from "./hindiNumerals.js";
 import { unusedNumbers } from "./unusedNumbers.js";
-import { leadingCustomerName } from "./leadingName.js";
+import { leadingCustomerName, trailingCustomerName } from "./leadingName.js";
 import { stripHonorifics } from "./honorific.js";
 import { auditPriceList } from "./priceListAudit.js";
 import {
@@ -80,7 +80,7 @@ import {
   kindById, decodeKind, readBusinessKind, readShopName, looksLikeAnOrder,
   isSkip, welcomeQuestion, nameQuestion, pricesQuestion, pricesRetry, finishedMessage,
   orderBeforePricesQuestion,
-  skippedMessage, SKIP_ACTION, FORMAT_ACTION, SHOP_ACTION, SAMPLE_ACTION, SAMPLE_MENU, type BusinessKind,
+  skippedMessage, SKIP_ACTION, FORMAT_ACTION, SHOP_ACTION, type BusinessKind,
 } from "./onboarding.js";
 import {
   CustomerAmbiguousError, findCustomer, findCustomerInMessage,
@@ -163,11 +163,9 @@ async function handleAdd(businessId: string, args: string): Promise<Reply> {
   // here that is still waiting on the seller before anything is saved.
   for (const change of priceChanges) {
     const action = encodePriceChange(change.name, change.to);
-    const direction = change.to > change.from ? "up" : "down";
     parts.push(
-      `"${change.name}" is already ${formatRupees(change.from)}.\n\n` +
-        `Change it ${direction} to ${formatRupees(change.to)}? This is what every ` +
-        `future bill will charge. Bills already made keep ${formatRupees(change.from)}.` +
+      `"${change.name}" is ${formatRupees(change.from)} now. Change to ${formatRupees(change.to)}?\n` +
+        `Old bills keep ${formatRupees(change.from)}.` +
         (action ? "" : `\n\nTo change it:  /add ${change.name} ${change.to}`),
     );
     if (action) {
@@ -504,34 +502,7 @@ async function handleRestartSetup(businessId: string): Promise<Reply> {
   return welcomeQuestion(false);
 }
 
-// Loads the sample menu and finishes setup, so the next message can be an
-// order. Only into an EMPTY price list: mixed into a real one, sample
-// prices would end up on real bills.
-async function handleSampleMenu(businessId: string): Promise<Reply> {
-  if ((await loadCatalog(businessId)).products.length > 0) {
-    return {
-      text:
-        "You already have a price list, so I left it as it is.\n\n" +
-        "The sample menu is only for trying me before you add your own prices. " +
-        "Send an order, or see your list with:  /prices",
-    };
-  }
-  await handleAdd(businessId, SAMPLE_MENU);
-  // The shop name is still required: tapped before it was given, the menu
-  // loads and the name question comes next instead of finishing setup.
-  const state = await loadOnboarding(businessId);
-  const needsName = state.step === "kind" || state.step === "name";
-  await setOnboardingStep(businessId, needsName ? "name" : "done");
-  const list = SAMPLE_MENU.split("\n")
-    .map((l) => `  ${titleCase(l.replace(/\s+\d+$/, ""))} — ${formatRupees(Number(l.match(/\d+$/)![0]))}`)
-    .join("\n");
-  const loaded = `Loaded a sample menu so you can try me:\n\n${list}\n\nThese are sample prices. Change any one like:  chai 20`;
-  if (needsName) {
-    return { text: `${loaded}\n\nLast thing — ${nameQuestion(kindById(state.kindId), "empty").text.replace(/^W/, "w")}` };
-  }
-  return { text: `${loaded}\n\nNow send an order, just as you'd type it:\n  Rahul 2 samosa 1 chai` };
-}
-
+// may still carry one on an earlier question — that re-asks the question.
 // Two signals that a setup answer is really an order: it names something
 // this shop sells, AND it carries a quantity (a digit or "do", "teen" …).
 // One alone is not enough — "Chai Point" names a product, "Cafe 24x7" has
@@ -637,7 +608,7 @@ async function handleOnboarding(
       const read = readShopName(text);
       if ("problem" in read) return nameQuestion(kind, read.problem);
       await setBusinessField(businessId, "name", read.name);
-      // Prices already in (the sample menu, or a seller redoing setup):
+      // Prices already in (added with /add first, or a seller redoing setup):
       // nothing left to ask.
       const priced = await loadCatalog(businessId);
       if (priced.products.length > 0) {
@@ -770,25 +741,14 @@ async function mentionsKnownProduct(businessId: string, text: string): Promise<b
 }
 
 // The honest reply when a message is not an order and names nobody known.
-async function notAnOrderReply(businessId: string, text: string): Promise<Reply> {
-  const customers = await listCustomers(businessId);
-  const looksLikeAName = /^[\p{L}\s'’.]+$/u.test(text.trim()) && text.trim().split(/\s+/).length <= 4;
-
-  if (looksLikeAName && customers.length > 0) {
-    return {
-      text:
-        `I don't have that customer yet.\n\n` +
-        `They'll appear here after their first bill \u2014 send one like:\n` +
-        `  Pooja 2 chai\n\n` +
-        `Customers I do have:\n${customers.slice(0, 10).map((c) => `  ${titleCase(c.name)}`).join("\n")}`,
-    };
-  }
-
+async function notAnOrderReply(_businessId: string, text: string): Promise<Reply> {
+  // Plain words with no quantity: an unknown customer, a typo or noise —
+  // one short answer for all of them, with the shape that works.
+  const words = text.trim().split(/\s+/).length <= 4 && /^[\p{L}\s'’.]+$/u.test(text.trim());
   return {
     text:
-      "I couldn't find an order in that — a bill needs quantities.\n\n" +
-      "Send it like:\n  Ravi 2 paneer 1 chai\n\n" +
-      "Or ask me about someone:\n  ravi\n  who hasn't paid\n  sales",
+      (words ? `I didn't understand "${text.trim()}".` : "I didn't find an order in that.") +
+      "\n\nSend an order like:\n  Rahul 2 samosa 1 chai",
   };
 }
 
@@ -1014,8 +974,15 @@ async function handleOrder(
     // An explicit "customer Rahul" line wins, then whatever the model
     // found, and only then position. The fallback can never overrule an
     // extraction — see leadingName.ts.
-    const namedCustomer =
-      extras.customer ?? parsed.customer ?? leadingCustomerName(orderText, namesAProduct);
+    const fromFront = extras.customer ?? parsed.customer ?? leadingCustomerName(orderText, namesAProduct);
+    // Last resort: a name at the END ("cake 2 fenil"). Less certain, so
+    // the reply says where it came from — see trailingCustomerName.
+    const isExactProduct = (phrase: string): boolean => {
+      const m = findProduct(phrase, catalogIndex);
+      return m !== null && m !== "ambiguous";
+    };
+    const fromEnd = fromFront ? null : trailingCustomerName(orderText, namesAProduct, isExactProduct);
+    const namedCustomer = fromFront ?? fromEnd;
     // "Rahul Bhai" and "Rahul" are one person. Two records split his
     // history and make his outstanding wrong in both — see honorific.ts.
     const resolvedCustomer = namedCustomer ? stripHonorifics(namedCustomer) : namedCustomer;
@@ -1028,9 +995,11 @@ async function handleOrder(
     // be looked up by name, chased for payment, or counted toward what a
     // customer owes. Asked ONCE, here, rather than on every later render —
     // a nudge that repeats becomes noise the seller learns to ignore.
-    const nudge = stored.session.customer_ref
-      ? ""
-      : "\n\nWho is this for? Say: this is Ravi";
+    const nudge = !stored.session.customer_ref
+      ? "\n\nWho is this for? Say: this is Ravi"
+      : fromEnd
+        ? `\n\nCustomer: ${fromEnd}. Wrong? Send: this is Ravi`
+        : "";
 
     // NOTHING THE SELLER TYPED DISAPPEARS WITHOUT A WORD.
     //
@@ -1206,12 +1175,6 @@ async function handleRemoveItem(businessId: string, args: string): Promise<Reply
   if (!updated) return { text: `"${name}" isn't on this bill.` };
   if (updated.items.length === 0) return { text: "That was the last item — the bill is now empty." };
   return billReply(updated, `Removed ${name}.`);
-}
-
-async function handleShowBill(businessId: string): Promise<Reply> {
-  const draft = await getCurrentDraft(businessId);
-  if (!draft) return { text: "No open bill. Send me an order and I'll make one." };
-  return billReply(draft);
 }
 
 // Resolves which bill the seller means: the one they numbered ("#1042"),
@@ -1448,8 +1411,7 @@ const SALES_PERIODS = [
 function salesPeriodPicker(): Reply {
   return {
     text:
-      "Sales for which period?\n\n" +
-      "Or type one, like:  sales 14 sept  ·  september sales  ·  last 6 months  ·  2025",
+      "Sales for which period?",
     actions: [
       ...SALES_PERIODS.map((p) => ({ label: p, action: `${SALES_PREFIX}${p}` })),
       { label: "\u{1f464} One customer", action: `${CUSTOMER_PREFIX}list` },
@@ -1479,7 +1441,7 @@ async function customerPicker(businessId: string): Promise<Reply> {
     groups.set(key, [...(groups.get(key) ?? []), c]);
   }
   return {
-    text: "Whose bills?\n\n" + `Most recent first. Someone not here? Type:  rahul bills`,
+    text: "Whose bills?\nNot listed? Type:  rahul bills",
     actions: [...groups.entries()].slice(0, CUSTOMER_LIST_SIZE).map(([first, people]) => ({
       label: `${titleCase(first)}${people.length > 1 ? ` (${people.length})` : ""}`.slice(0, 24),
       action:
@@ -2035,14 +1997,6 @@ export async function handleAction(incoming: IncomingMessage, action: string): P
     }
   }
 
-  if (action === SAMPLE_ACTION) {
-    try {
-      return await handleSampleMenu(businessId);
-    } catch (err) {
-      return { text: sellerFacing(err) };
-    }
-  }
-
   if (action === SKIP_ACTION || action === FORMAT_ACTION || action === SHOP_ACTION) {
     try {
       if (action === SKIP_ACTION) return await handleSkipSetup(businessId);
@@ -2228,7 +2182,7 @@ async function runCommand(
         return await handleRestartSetup(businessId);
       case "/add":
         if (args.trim().length === 0) {
-          return await awaitArguments(businessId, "/add", "Type your prices 👇\n\nItem and price, one per line:\n  paneer 220\n  chai 15", "paneer 220");
+          return await awaitArguments(businessId, "/add", "Type your prices 👇\nOne per line, like:  paneer 220", "paneer 220");
         }
         return await handleAdd(businessId, args);
       case "/prices":
@@ -2254,17 +2208,19 @@ async function runCommand(
         return await handleLearned(businessId);
       case "/forget":
         return await handleForget(businessId, args);
+      // /bill is THE billing command; /zbill is the original name, kept as
+      // an alias so sellers who learned it are not broken. One handler —
+      // the two can never diverge. (Bare /bill used to show the open bill;
+      // "show bill" still does.)
       case "/bill":
-        if (args.trim().length === 0) return await handleShowBill(businessId);
-      // falls through: "/bill pizza 500" is an order, never silently drop it
       case "/zbill": {
         const replied = incoming.repliedText?.trim();
         const orderText = args.trim().length > 0 ? args.trim() : replied ?? "";
         if (orderText.length === 0) {
           return await awaitArguments(
             businessId,
-            "/zbill",
-            "Type the order 👇\n\nCustomer, then items — like:\n  Rahul 2 samosa 1 chai",
+            "/bill",
+            "Type the order 👇\nLike:  Rahul 2 samosa 1 chai",
             "Rahul 2 samosa 1 chai",
           );
         }

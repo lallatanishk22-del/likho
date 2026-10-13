@@ -44,9 +44,7 @@ export function registrationPrompt(retry = false): Reply {
   return {
     text: retry
       ? "Please tap the button below to share your own number."
-      : "\u{1f44b} Welcome to Likho.\n\n" +
-        "Register with your phone number to start. Tap the button below — " +
-        "Telegram sends your number securely, nothing to type.",
+      : "\u{1f44b} Welcome to Likho.\n\nTap below to register with your phone number.",
     requestContact: SHARE_PHONE_LABEL,
   };
 }

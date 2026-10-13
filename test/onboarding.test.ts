@@ -114,8 +114,8 @@ test("only the price question can be skipped; the shop name is required", () => 
   for (const q of [welcomeQuestion(false), nameQuestion(kind)]) {
     assert.ok(!q.actions?.some((a) => a.action === SKIP_ACTION), q.text);
   }
-  // The first question is still never a dead end: a kind, or the sample menu.
-  assert.ok((welcomeQuestion(false).actions?.length ?? 0) >= 5);
+  // The first question is still never a dead end: one button per kind.
+  assert.equal(welcomeQuestion(false).actions?.length, BUSINESS_KINDS.length);
 });
 
 // --- Reading a shop name --------------------------------------------------
@@ -150,7 +150,7 @@ test("an empty or oversized name is refused with a reason", () => {
 test("the name question explains what was wrong with the last answer", () => {
   const kind = BUSINESS_KINDS[0]!;
   assert.match(nameQuestion(kind, "looks_like_an_order").text, /shop name/i);
-  assert.match(nameQuestion(kind, "too_long").text, /shorter/i);
+  assert.match(nameQuestion(kind, "too_long").text, /too long/i);
 });
 
 // --- Billing beats a questionnaire ----------------------------------------
@@ -198,7 +198,8 @@ test("the price examples are written in the trade's own words", () => {
   // A tiffin seller shown "sugar 1kg 48" has to translate before answering.
   for (const kind of BUSINESS_KINDS) {
     const q = pricesQuestion(kind, "Shop");
-    for (const example of kind.examples) assert.ok(q.text.includes(example));
+    // The question shows the first three, kept short; each is the trade's own.
+    for (const example of kind.examples.slice(0, 3)) assert.ok(q.text.includes(example), example);
   }
 });
 

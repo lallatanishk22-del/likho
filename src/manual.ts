@@ -26,143 +26,82 @@ const TOPICS: Topic[] = [
     label: "🚀 Getting started",
     text: `<b>🚀 Getting started</b>
 
-<b>1. Add your prices</b>
-Tap /add, then type one item and price per line:
+1. Add prices: tap /add
 <code>paneer 220
 chai 15</code>
-Just trying me out? Tap /start → ⚡ <b>Try a sample menu</b>.
-
-<b>2. Make your first bill</b>
+2. Send an order:
 <code>Rahul 2 samosa 1 chai</code>
-
-<b>3. Check it, then tap ✅ Confirm</b>
-
-<b>✔ Check</b>
-• /prices shows every item at the right price`,
+3. Check it, tap ✅ Confirm`,
   },
   {
     id: "bill",
     label: "🧾 Make a bill",
-    text: `<b>🧾 Making a bill</b>
+    text: `<b>🧾 Make a bill</b>
 
-<b>Any of these works</b>
-• Type it: <code>Rahul 2 samosa 1 chai</code>
-• Tap /zbill, then type the order
-• Forward the customer's message to me
-
-<b>Write it like this</b>
-Name first, then number before each item.
+Just type it, or tap /bill:
 <code>Rahul 2 samosa 1 chai</code>
 
-<b>Extras</b>
-<code>Rahul 2 samosa 10% discount</code>
-<code>Rahul 2 samosa ₹25 each</code> — this bill only
-Delivery goes on its own line:
-<code>Rahul 2 samosa
-delivery 30</code>
+Discount: <code>Rahul 2 samosa 10% discount</code>
+Own price: <code>Rahul 2 samosa ₹25 each</code>
+Delivery, on its own line:
+<code>delivery 30</code>
 
-<b>✔ Check before you tap Confirm</b>
-• Customer name (missing? send <code>this is Rahul</code>)
-• Every item and quantity
-• Prices and the total
-A confirmed bill can't be changed.
-
-If I ask a question, just reply with the answer, like <code>2</code>.`,
+✔ Check name, items and total before Confirm.`,
   },
   {
     id: "fix",
     label: "✏️ Fix a bill",
-    text: `<b>✏️ Fixing a bill</b>
-Works until you tap ✅ Confirm.
+    text: `<b>✏️ Fix a bill</b> (before Confirm)
 
 <code>add 2 samosa</code>
 <code>remove lassi</code>
 <code>actually paneer was 3</code>
-<code>this is Rahul</code> — set the name
+<code>this is Rahul</code>
 
-<b>✔ Check</b>
-• Changes go to your <b>latest unconfirmed bill from today</b>. The reply shows the bill number and name — make sure it's the right one.
-
-<b>Made a wrong bill?</b>
-Fix it with <code>remove …</code> and <code>add …</code> before you confirm. Every bill counts in your sales, even unconfirmed ones.`,
+✔ Fixes go to your latest open bill. Check its number.`,
   },
   {
     id: "pay",
     label: "💰 Payments",
     text: `<b>💰 Payments</b>
 
-<b>Paid in full</b>
-Tap 💰 <b>Mark Paid</b> on the bill, or:
-<code>#1042 paid</code>
+Full: tap 💰 <b>Paid</b> or <code>#1042 paid</code>
+Part: <code>#1042 paid 200</code>
+Dues: <code>who owes me</code>
 
-<b>Part payment</b>
-<code>#1042 paid 200</code>
-If they pay more than the bill, I tell you the extra and don't record it.
-
-<b>Who owes you</b>
-<code>who owes me</code>
-<code>rahul bills</code>
-
-<b>✔ Check</b>
-• Only record money you actually received — a customer saying "paid" is not proof
-• The bill shows <b>Paid in full</b>, or <b>Paid ₹X · Due ₹Y</b>`,
+✔ Only record money you actually received.`,
   },
   {
     id: "sales",
     label: "📊 Sales",
-    text: `<b>📊 Sales &amp; ledger</b>
+    text: `<b>📊 Sales</b>
 
-Tap /sales and pick a period, or type one:
-<code>sales</code> — today
-<code>this week sales</code>
-<code>september sales</code>
-<code>last 3 months</code>
-<code>2025 sales</code>
+Tap /sales and pick a period, or type:
+<code>sales</code> · <code>september sales</code> · <code>last 3 months</code>
 
-You get <b>Billed</b>, <b>Received</b> and <b>Due</b>. Tap 📄 <b>Ledger PDF</b> for every bill in a sheet.
-
-<b>One customer</b>
-Tap /customers and pick a person, or type:
-<code>rahul bills</code>
-<code>rahul bills this month</code>
-
-<b>✔ Check at the end of the day</b>
-• <code>open bills</code> — confirm each one or fix it. Every bill counts in your sales, so don't leave wrong ones.`,
+One customer: tap /customers or type <code>rahul bills</code>
+Tap 📄 <b>Ledger PDF</b> for a full sheet.`,
   },
   {
     id: "prices",
     label: "🏷️ Prices",
     text: `<b>🏷️ Prices</b>
 
-<b>Add or change</b>
-<code>/add paneer 220</code>
-If paneer already has a price, I ask before changing it. Old bills keep their old price.
+Add or change: <code>/add chai 20</code>
+Remove: <code>/remove chai</code>
+Rename: <code>rename panner to paneer</code>
+See all: /prices
 
-<b>Remove / rename</b>
-<code>/remove paneer</code>
-<code>rename panner to paneer</code>
-
-<b>See them</b>
-/prices — also flags likely mistakes; tap to fix.
-
-<b>⚠ Don't</b> send <code>chai 20</code> on its own to change a price — that's an order for 20 chai. Use <code>/add chai 20</code>.`,
+⚠ <code>chai 20</code> alone is an order for 20 chai.`,
   },
   {
     id: "trouble",
     label: "⚠️ Problems",
-    text: `<b>⚠️ When something's off</b>
+    text: `<b>⚠️ Problems</b>
 
-<b>"I couldn't find …"</b>
-Check the spelling, or add it: <code>/add chai 15</code>
-
-<b>I picked the wrong item</b>
-Fix it before confirming: <code>remove …</code> then <code>add …</code>
-
-<b>"I couldn't reach your records"</b>
-Wait a minute and send it again. Before resending an order, check <code>open bills</code> so you don't bill it twice.
-
-<b>No reply at all</b>
-Wait a minute. If it still doesn't answer, tell the Likho team.`,
+Item not found → <code>/add chai 15</code>
+Wrong item → <code>remove …</code> then <code>add …</code>
+"Couldn't reach records" → wait a minute, check <code>open bills</code>, then resend.`,
   },
 ];
 
@@ -172,9 +111,9 @@ export function manualHome(intro?: string): Reply {
   return {
     text:
       (intro ? `${intro}\n\n` : "") +
-      `<b>Likho</b> — type the order, I make the bill.\n\n` +
+      `<b>Likho</b> — type the order, get the bill.\n\n` +
       `<code>Rahul 2 samosa 1 chai</code>\n\n` +
-      `Pick a topic for step-by-step help and what to check:`,
+      `Help topics:`,
     parseMode: "HTML",
     actions: TOPICS.map((t) => ({ label: t.label, action: `${MANUAL_PREFIX}${t.id}` })),
   };

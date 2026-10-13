@@ -43,3 +43,39 @@ test("a report button for a past year reopens that year, not this one", () => {
   assert.equal(r.label, "13 Sept 2025");
   assert.equal(back.from.getTime(), r.from.getTime());
 });
+
+test("a name before an item-then-quantity order is kept", async () => {
+  const { leadingCustomerName } = await import("../src/leadingName.js");
+  // Like the real matcher: a phrase that CONTAINS a product also matches.
+  const catalog = ["chai", "samosa", "kachori", "silver", "rose milk"];
+  const sells = (p: string) => catalog.some((c) => ` ${p} `.includes(` ${c} `));
+  assert.equal(leadingCustomerName("Tanishk chai 1 samosa 2 kachori 3 discount 15%", sells), "Tanishk");
+  assert.equal(leadingCustomerName("pankay silver 5", sells), "Pankay");
+  assert.equal(leadingCustomerName("chai 1 samosa 2", sells), null, "a product first names nobody");
+  assert.equal(leadingCustomerName("rose milk 2", sells), null, "a two-word product is not a name");
+});
+
+test("a name at the end of the order is kept, not dropped", async () => {
+  const { trailingCustomerName } = await import("../src/leadingName.js");
+  const catalog = ["cake", "chai", "samosa", "mudpie", "paneer tikka"];
+  const sells = (p: string) => catalog.some((c) => ` ${p} `.includes(` ${c} `));
+  const exact = (p: string) => catalog.includes(p);
+  const t = (m: string) => trailingCustomerName(m, sells, exact);
+  assert.equal(t("cake 2 fenil"), "Fenil");
+  assert.equal(t("3 mudpie ria bhanushali"), "Ria Bhanushali");
+  assert.equal(t("2 chai for rahul"), "Rahul");
+  assert.equal(t("2 paneer tikka 1 chai rahul"), "Rahul");
+  assert.equal(t("2 chai\n3 samosa\nRahul"), "Rahul");
+});
+
+test("order words and products at the end are never taken as a name", async () => {
+  const { trailingCustomerName } = await import("../src/leadingName.js");
+  const catalog = ["cake", "chai", "samosa", "paneer tikka"];
+  const sells = (p: string) => catalog.some((c) => ` ${p} `.includes(` ${c} `));
+  for (const t of [
+    "2 chai 3 samosa", "chai 2 samosa 3", "2 chai garam", "3 chai bhej do", "2 paneer tikka chahiye",
+    "2 samosa extra spicy", "1 cake 500 rs", "2 chai each", "2 chai aaj", "rahul ka bill", "2 cake 1 kg",
+  ]) {
+    assert.equal(trailingCustomerName(t, sells, (p) => catalog.includes(p)), null, t);
+  }
+});

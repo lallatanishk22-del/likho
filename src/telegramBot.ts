@@ -388,14 +388,14 @@ async function setBotProfile(): Promise<void> {
       "setMyCommands",
       {
         commands: [
-          { command: "start", description: "Get set up in under a minute" },
-          { command: "zbill", description: "Make a bill — tap, then type the order" },
-          { command: "add", description: "Save prices — tap, then type item and price" },
-          { command: "prices", description: "See your price list" },
-          { command: "sales", description: "Sales & ledger — pick a period" },
-          { command: "customers", description: "One customer's bills — pick a person" },
-          { command: "open", description: "Bills not confirmed yet" },
-          { command: "help", description: "Everything I can do" },
+          { command: "start", description: "Set up your shop" },
+          { command: "bill", description: "Make a bill" },
+          { command: "add", description: "Add or change prices" },
+          { command: "prices", description: "Your price list" },
+          { command: "sales", description: "Sales report" },
+          { command: "customers", description: "A customer's bills" },
+          { command: "open", description: "Unconfirmed bills" },
+          { command: "help", description: "How to use Likho" },
         ],
       },
     ],
@@ -403,14 +403,12 @@ async function setBotProfile(): Promise<void> {
       "setMyDescription",
       {
         description:
-          "Likho turns a typed order into a correct bill.\n\n" +
-          "Type it the way you'd write it — \"Rahul 2 samosa 1 chai\", Hinglish is fine — " +
-          "and Likho prices it from your list, adds it up, and keeps the record: " +
-          "who bought what, who has paid, today's sales.\n\n" +
-          "Tap Start, then \"Try a sample menu\" to see a bill in seconds.",
+          "Type an order, get a correct bill.\n\n" +
+          "Works in Hinglish. Tracks sales and dues.\n\n" +
+          "Tap Start to begin.",
       },
     ],
-    ["setMyShortDescription", { short_description: "Type an order, get a correct bill. Built for small Indian sellers." }],
+    ["setMyShortDescription", { short_description: "Type an order, get a correct bill." }],
   ];
   for (const [method, body] of calls) {
     try {

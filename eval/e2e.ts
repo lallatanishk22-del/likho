@@ -40,13 +40,13 @@ async function run(): Promise<void> {
   let r = await say("/start");
   check("start opens setup", /what do you sell/i.test(plain(r)), r);
   r = await tap("kind:restaurant");
-  check("picking a kind asks the shop name", /business called/i.test(plain(r)), r);
+  check("picking a kind asks the shop name", /shop called/i.test(plain(r)), r);
   r = await say("skip");
   check("shop name cannot be skipped", /shop name is needed/i.test(plain(r)), r);
   r = await say("E2E Cafe");
-  check("shop name saved, prices asked", /Saved — E2E Cafe/.test(plain(r)) && /how much/i.test(plain(r)), r);
+  check("shop name saved, prices asked", /E2E Cafe/.test(plain(r)) && /your prices/i.test(plain(r)), r);
   r = await say("paneer tikka 180\nbutter naan 40\nchai 15\nsamosa 20");
-  check("price list finishes setup", /set up/i.test(plain(r)), r);
+  check("price list finishes setup", /All set/i.test(plain(r)), r);
 
   // --- Billing ------------------------------------------------------------
   r = await say("Rahul 2 paneer tikka 3 butter naan");
@@ -62,14 +62,29 @@ async function run(): Promise<void> {
   r = await say("actually paneer tikka was 3");
   check("correct a quantity", billHasItem(r.text, "Paneer Tikka", 3), r);
 
-  r = await say("/zbill");
-  check("bare /zbill asks for the order with an example", Boolean(r.inputPlaceholder), r);
+  r = await say("/bill");
+  check("bare /bill asks for the order with an example", Boolean(r.inputPlaceholder), r);
   r = await say("Priya 2 samosa 10% discount");
   const priya = billNo(r);
   check("tap-then-type order, with discount", billHasItem(r.text, "Samosa", 2) && /TOTAL\s+₹36/.test(plain(r)), r);
 
   r = await say("Amit 1,00,000 samosa");
   check("lakh-formatted quantity is one number", billHasItem(r.text, "Samosa", 100000), r);
+
+  // /bill is canonical; /zbill is an alias of the SAME handler.
+  r = await say("/bill Tanishk chai 1 samosa 2 10% discount");
+  const viaBill = plain(r).replace(/Bill #\d+/, "Bill #N").replace(/\d+ \w+ \d{4}, [\d:]+ [ap]m/, "DATE");
+  check("/bill with a name, items and a discount",
+    billCustomer(r.text) === "Tanishk" && billHasItem(r.text, "Chai", 1) && billHasItem(r.text, "Samosa", 2) && /TOTAL\s+₹49\.50/.test(plain(r)), r);
+  r = await say("/zbill Tanishk chai 1 samosa 2 10% discount");
+  const viaZbill = plain(r).replace(/Bill #\d+/, "Bill #N").replace(/\d+ \w+ \d{4}, [\d:]+ [ap]m/, "DATE");
+  check("/zbill still works and gives the identical bill", viaBill === viaZbill, r);
+  r = await say("/bill@zbillingbot 1 chai");
+  check("/bill@botname bills only the order", billHasItem(r.text, "Chai", 1) && !/zbillingbot/i.test(plain(r)), r);
+  const dupBill = `${SHOP}-dupbill`;
+  await say("/bill Neha 2 samosa", dupBill);
+  r = await say("/bill Neha 2 samosa", dupBill);
+  check("the same /bill message twice → one bill", /Already billed/.test(plain(r)), r);
 
   const dupId = `${SHOP}-dup`;
   await say("Neha 1 chai", dupId);
@@ -94,7 +109,7 @@ async function run(): Promise<void> {
 
   // --- Prices ---------------------------------------------------------------
   r = await say("/add chai 20");
-  check("changing a price asks first", /Change it/i.test(plain(r)), r);
+  check("changing a price asks first", /Change to/i.test(plain(r)), r);
   await say("/remove samosa");
   r = await say("/add samosa 25");
   check("re-adding a removed item", /samosa — ₹25/i.test(plain(r)), r);
@@ -112,9 +127,9 @@ async function run(): Promise<void> {
     r = await say(period);
     check(`report: ${period}`, /Billed|Nothing billed/.test(plain(r)), r);
   }
-  r = await say("/zbill");
+  r = await say("/bill");
   r = await say("2 months bill");
-  check("report request inside /zbill gives the report", /Last 2 months/.test(plain(r)), r);
+  check("report request inside /bill gives the report", /Last 2 months/.test(plain(r)), r);
   r = await say("/sales");
   check("/sales offers period buttons", (r.actions ?? []).length >= 9, r);
   r = await tap("sales:This month");
@@ -147,7 +162,7 @@ async function run(): Promise<void> {
   r = await say("/help");
   check("help shows the manual topics", (r.actions ?? []).length === 7, r);
   r = await tap("help:pay");
-  check("a manual topic opens", /Part payment/.test(plain(r)), r);
+  check("a manual topic opens", /Part:/.test(plain(r)), r);
   r = await say("/foo");
   check("unknown command explains itself", /don't know/i.test(plain(r)), r);
   r = await say("asdkjh qwe");
@@ -160,7 +175,7 @@ async function run(): Promise<void> {
   await as("/add chai 15\nsamosa 20");
   r = await as("2 chai");
   check("order before setup is billed, name asked after",
-    billHasItem(r.text, "Chai", 2) && (r.follow ?? []).some((f) => /business called/i.test(f.text)), r);
+    billHasItem(r.text, "Chai", 2) && (r.follow ?? []).some((f) => /shop called/i.test(f.text)), r);
   r = await as("do samosa");
   check("next order during setup is billed too, not blocked by the name question", billHasItem(r.text, "Samosa", 2), r);
   r = await as("ek chai aur do samosa");

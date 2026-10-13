@@ -46,6 +46,8 @@ const CASES: Case[] = [
   { message: "3 mudpie", expect: null },
   { message: "2 chai 1 lassi", expect: null },
   { message: "/zbill 2 chai", expect: null },
+  { message: "/bill ria bhanushali 3 mudpie", expect: "ria" },
+  { message: "/bill 2 chai", expect: null },
 ];
 
 async function run(): Promise<void> {

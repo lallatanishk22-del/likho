@@ -225,7 +225,7 @@ export async function takePendingResolution(
 export const CLARIFY_PREFIX = "__clarify__:";
 // The question "what does this new item cost?" — its message is the name.
 export const PRICE_QUESTION = "price-for-new-item";
-// A bare command ("/zbill" tapped from the menu) waiting for its
+// A bare command ("/bill" tapped from the menu) waiting for its
 // arguments — its message is the command.
 export const AWAIT_COMMAND = "await-command";
 const CLARIFY_TTL_MS = 15 * 60 * 1000;

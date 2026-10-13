@@ -32,11 +32,11 @@ export function titleCase(name: string): string {
 // double rules, payment on its own line. Rendered from STORED state so the
 // seller always sees exactly what is persisted.
 //
-// 30 characters wide: Telegram starts scrolling a <pre> block sideways at
-// roughly 30–34 on a phone. Columns size themselves to the widest amount
-// and quantity, so a ₹1,00,00,000 line or a quantity of 1,00,000 shrinks
-// the name column instead of breaking the layout.
-export const RECEIPT_WIDTH = 30;
+// 24 characters wide. 30 wrapped every line on a phone with larger text
+// (about 28 fit), which broke the whole receipt. Columns size themselves
+// to the widest amount and quantity, so a ₹1,00,00,000 line or a quantity
+// of 1,00,000 shrinks the name column instead of breaking the layout.
+export const RECEIPT_WIDTH = 24;
 
 export interface ReceiptInput {
   billNo: number;
@@ -174,7 +174,7 @@ export function billActions(stored: StoredBill): ReplyAction[] {
     actions.push({ label: "\u2705 Confirm", action: `confirm:${no}` });
   }
   if (stored.session.payment_status !== "paid") {
-    actions.push({ label: "\u{1f4b0} Mark Paid", action: `paid:${no}` });
+    actions.push({ label: "\u{1f4b0} Paid", action: `paid:${no}` });
   }
   actions.push({ label: "\u{1f4c4} PDF", action: `pdf:${no}` });
   return actions;
